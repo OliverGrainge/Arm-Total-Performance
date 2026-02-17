@@ -68,7 +68,7 @@ void matmul_neon(const float* A, const float* B, float* C, int N) {
 }
 
 int main(int argc, char* argv[]) {
-    int N = 2048;
+    int N = 8192;
     if (argc > 1) N = std::atoi(argv[1]);
 
     std::vector<float> A(N * N);
