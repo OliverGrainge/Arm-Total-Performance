@@ -1,0 +1,40 @@
+# Project-specific: planning and internal docs
+PLAN.md
+plan.md
+CLAUDE.md
+SoW*
+SOW*
+
+# Build directories
+build/
+**/build/
+cmake-build-*/
+**/cmake-build-*/
+
+# CMake (generated in build dirs)
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Compiled binaries
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.exe
+matmul_naive
+matmul_reordered
+matmul_tiled
+
+# IDE and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
