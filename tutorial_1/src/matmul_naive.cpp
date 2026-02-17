@@ -5,8 +5,12 @@
 #include <vector>
 
 // Dense matrix multiplication: C = A * B
-// Naive ijk ordering — inner loop strides down columns of B,
-// causing poor spatial locality and heavy cache misses.
+// Naive ijk ordering — the inner loop accesses B[k*N+j] with stride N,
+// jumping across rows on every iteration. For N=4096 each stride is 16 KB,
+// far exceeding a cache line.  The full B matrix (64 MB) does not fit in
+// the last-level cache (32 MB on Graviton3), so almost every B access
+// results in an LLC miss and a trip to DRAM.  This makes the workload
+// heavily Backend Bound → Memory Bound in the Top-Down model.
 
 void matmul_naive(const float* A, const float* B, float* C, int N) {
     for (int i = 0; i < N; ++i) {

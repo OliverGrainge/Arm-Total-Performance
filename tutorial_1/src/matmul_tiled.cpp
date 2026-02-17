@@ -6,17 +6,23 @@
 #include <vector>
 
 // Dense matrix multiplication: C = A * B
-// 2D tiled version — all three dimensions (i, j, k) are tiled so that
-// the A, B, and C sub-blocks fit entirely in L1d cache.
+// 2D tiled version — all three loop dimensions (i, j, k) are blocked so
+// that the working set fits in L2 cache.
 //
-// Graviton3 has 64 KB L1d and 1 MB L2 per core.
-// A tile of 64×64 floats = 16 KB, so three tiles (A, B, C) = 48 KB
-// which fits comfortably in L1d. This minimises both L1 and L2 misses,
-// moving the workload from Memory Bound toward Retiring.
+// Graviton3: 64 KB L1d, 1 MB L2, ~32 MB LLC per core.
+// TILE = 128 → each tile is 128×128×4 = 64 KB.
+// Three tiles (A, B, C sub-blocks) = 192 KB — fits comfortably in L2
+// but does NOT fit in L1d (64 KB).
+//
+// Compared to the naive version, LLC misses are largely eliminated
+// because the tiles are re-used while resident in L2.  However L1d
+// misses remain elevated because each tile exceeds the L1d capacity.
+// The workload shifts from LLC-miss-dominated to L1-miss-dominated,
+// which ATP will show as a reduction in Backend Memory Bound stalls.
 
-constexpr int TILE = 64;
+constexpr int TILE = 128;
 
-void matmul_tiled_2d(const float* A, const float* B, float* C, int N) {
+void matmul_tiled(const float* A, const float* B, float* C, int N) {
     std::memset(C, 0, N * N * sizeof(float));
 
     for (int i0 = 0; i0 < N; i0 += TILE) {
@@ -56,7 +62,7 @@ int main(int argc, char* argv[]) {
     auto start = std::chrono::high_resolution_clock::now();
     std::chrono::high_resolution_clock::time_point end;
     do {
-        matmul_tiled_2d(A.data(), B.data(), C.data(), N);
+        matmul_tiled(A.data(), B.data(), C.data(), N);
         ++reps;
         end = std::chrono::high_resolution_clock::now();
     } while (std::chrono::duration<double>(end - start).count() < 5.0);

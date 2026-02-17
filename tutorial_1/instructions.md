@@ -1,12 +1,12 @@
 # Tutorial 1: Top-Down Performance Analysis Methodology
 
-In this tutorial you will use **Arm Total Performance (ATP)** to profile a dense matrix multiplication kernel — the fundamental operator behind fully-connected layers and attention in ML models. Starting from a naive implementation, you will use ATP's Top-Down Methodology view to identify the microarchitectural bottleneck, then apply two successive cache-tiling optimisations and measure their impact.
+In this tutorial you will use **Arm Total Performance (ATP)** to profile a dense matrix multiplication kernel — the fundamental operator behind fully-connected layers and attention in ML models. Starting from a naive implementation, you will use ATP's Top-Down Methodology view to identify the microarchitectural bottleneck, then apply two successive optimisations — cache tiling and register blocking with NEON — measuring their impact at each step.
 
 By the end you will be able to:
 
 - Collect a top-down microarchitectural profile with ATP on a Graviton instance.
 - Interpret the four top-level categories: **Frontend Bound**, **Backend Bound**, **Retiring**, and **Bad Speculation**.
-- Use 1D tiling and 2D tiling to progressively shift a workload from memory-bound to compute-efficient.
+- Use 2D tiling and NEON register blocking to progressively shift a workload from memory-bound to compute-efficient.
 
 ---
 
@@ -34,9 +34,9 @@ This produces three executables:
 
 | Binary | Description |
 |--------|-------------|
-| `matmul_naive` | ijk loop order — poor spatial locality on B |
-| `matmul_tiled_1d` | k-dimension tiling — B strip fits in L2 but not L1 |
-| `matmul_tiled_2d` | Full i,j,k tiling — working set fits entirely in L1d |
+| `matmul_naive` | ijk loop order — strided B access causes LLC misses |
+| `matmul_tiled` | 2D tiling (i,j,k) — working set fits in L2 but not L1 |
+| `matmul_neon`  | L1-fitting tiles + 4×4 NEON register blocking |
 
 All three compute the same result (`C = A × B` for 4096×4096 float matrices by default). You can pass a custom size as the first argument, e.g. `./matmul_naive 2048`.
 
@@ -79,7 +79,7 @@ void matmul_naive(const float* A, const float* B, float* C, int N) {
 }
 ```
 
-Each iteration accesses `B[k * N + j]` — jumping by `N` floats (16 KB for N=4096) on every step. This means every access to B lands in a different cache line, causing a cache miss on nearly every iteration. The CPU spends most of its time waiting for data from memory rather than doing useful computation.
+Each iteration accesses `B[k * N + j]` — jumping by N floats (16 KB for N=4096) on every step. This means every access to B lands in a different cache line. The full B matrix is 4096 × 4096 × 4 = 64 MB, far exceeding the last-level cache (~32 MB on Graviton3). Almost every B access results in an LLC miss and a round-trip to DRAM. The CPU spends most of its time waiting for data from memory rather than doing useful computation.
 
 ---
 
@@ -102,68 +102,18 @@ The key observation: the workload is heavily **Backend Bound → Memory Bound**.
 Note the following metrics:
 - **IPC** (Instructions Per Cycle) — will be low (likely < 1.0), indicating the pipeline is frequently stalled.
 - **Backend Bound %** — will dominate the top-down breakdown.
-- **L1D Cache Miss Rate** — will be high due to the strided B access pattern.
+- **LLC miss rate** — will be high due to the strided B access pattern hitting DRAM on nearly every access.
 
 ---
 
-## 4. Optimisation 1 — 1D Tiling (k-strip)
+## 4. Optimisation 1 — 2D Tiling (cache blocking)
 
-Rather than iterating over the full k dimension at once, we split k into blocks of size `TILE`. Within each k-block the loop order is ikj, giving stride-1 access on B and C. The kernel in `src/matmul_tiled_1d.cpp` is:
-
-```cpp
-constexpr int TILE = 64;
-
-void matmul_tiled_1d(const float* A, const float* B, float* C, int N) {
-    std::memset(C, 0, N * N * sizeof(float));
-    for (int k0 = 0; k0 < N; k0 += TILE) {
-        int k_end = std::min(k0 + TILE, N);
-        for (int i = 0; i < N; ++i) {
-            for (int k = k0; k < k_end; ++k) {
-                float a_ik = A[i * N + k];
-                for (int j = 0; j < N; ++j) {
-                    C[i * N + j] += a_ik * B[k * N + j];
-                }
-            }
-        }
-    }
-}
-```
-
-**Why does this help?** Within each k-block, the B strip accessed is `TILE` rows × N columns = 64 × 4096 × 4 bytes = **1 MB**. This fits in Graviton3's L2 cache (1 MB per core), so each B row is fetched from main memory once per k-block rather than once per row of A. L2 misses drop significantly.
-
-**Why isn't it enough?** The 1 MB B strip does NOT fit in L1d (64 KB). The j loop still sweeps across the full N columns of B and C, so L1 misses remain elevated.
-
-Run it:
-
-```bash
-./matmul_tiled_1d
-```
-
-You should see a significant speedup over the naive version.
-
-### Re-profile with ATP
-
-<!-- TODO: ATP profiling command and screenshot -->
-
-Profile `matmul_tiled_1d` and compare the Top-Down view to the naive version:
-
-- **Backend Bound %** should drop substantially.
-- **Memory Bound** sub-category should decrease — fewer L2 misses.
-- **L1D miss rate** remains elevated — the B strip doesn't fit in L1.
-- **IPC** should improve noticeably.
-
-<!-- TODO: Side-by-side screenshot comparison -->
-
----
-
-## 5. Optimisation 2 — 2D Tiling (full blocking)
-
-To eliminate L1 misses we tile all three dimensions. Now the inner loops work on TILE×TILE sub-blocks of A, B, and C that fit entirely in L1d cache. The kernel in `src/matmul_tiled_2d.cpp` is:
+To eliminate LLC misses we tile all three loop dimensions (i, j, k). The inner loops work on TILE×TILE sub-blocks of A, B, and C that fit in L2 cache. The kernel in `src/matmul_tiled.cpp` is:
 
 ```cpp
-constexpr int TILE = 64;
+constexpr int TILE = 128;
 
-void matmul_tiled_2d(const float* A, const float* B, float* C, int N) {
+void matmul_tiled(const float* A, const float* B, float* C, int N) {
     std::memset(C, 0, N * N * sizeof(float));
     for (int i0 = 0; i0 < N; i0 += TILE) {
         for (int j0 = 0; j0 < N; j0 += TILE) {
@@ -185,24 +135,96 @@ void matmul_tiled_2d(const float* A, const float* B, float* C, int N) {
 }
 ```
 
-**Why TILE = 64?** A 64×64 tile of floats is 64 × 64 × 4 = 16 KB. Three tiles (A, B, C sub-blocks) total 48 KB, which fits comfortably in the Graviton3 L1d cache (64 KB per core). The inner loops run almost entirely out of L1, minimising both L1 and L2 stalls.
+**Why TILE = 128?** A 128×128 tile of floats is 128 × 128 × 4 = 64 KB. Three tiles (A, B, C sub-blocks) total 192 KB, which fits comfortably in Graviton3's L2 cache (1 MB per core). The tiles do NOT fit in L1d (64 KB), so L1 misses remain — but they now hit L2 instead of DRAM. LLC misses are largely eliminated because the sub-blocks are re-used while resident in L2.
+
+**What remains?** The working set exceeds L1d capacity, so every access within the inner loops still misses L1 and pays the L2 latency penalty (~10 cycles vs ~4 cycles for L1). The code is also still scalar — one float multiply-add per instruction — wasting the SIMD execution width.
 
 Run it:
 
 ```bash
-./matmul_tiled_2d
+./matmul_tiled
 ```
 
-You should see a further speedup over the 1D-tiled version.
+You should see a significant speedup over the naive version.
 
 ### Re-profile with ATP
 
 <!-- TODO: ATP profiling command and screenshot -->
 
-Profile `matmul_tiled_2d` and look at the Top-Down view:
+Profile `matmul_tiled` and compare the Top-Down view to the naive version:
 
-- **Backend Bound %** should drop further, and the sub-category should shift from **Memory Bound** toward **Core Bound** (the memory subsystem is no longer the primary bottleneck).
-- **Retiring %** should be at its highest — more cycles are spent doing useful FP work.
+- **Backend Bound %** should drop substantially.
+- **Memory Bound** sub-category should shift from LLC-miss-dominated to L1-miss-dominated — the data now lives in L2 instead of DRAM.
+- **Retiring %** should increase — more cycles are spent doing useful work.
+- **IPC** should improve noticeably.
+
+<!-- TODO: Side-by-side screenshot comparison -->
+
+---
+
+## 5. Optimisation 2 — Register Blocking with NEON
+
+The tiled version is still limited in two ways: (1) each tile exceeds L1d so accesses pay L2 latency, and (2) each instruction processes only a single float. We fix both by shrinking the tile to fit in L1d and adding a 4×4 NEON micro-kernel. The kernel in `src/matmul_neon.cpp` is:
+
+```cpp
+constexpr int TILE = 64;
+
+void matmul_neon(const float* A, const float* B, float* C, int N) {
+    std::memset(C, 0, N * N * sizeof(float));
+    for (int i0 = 0; i0 < N; i0 += TILE) {
+        for (int j0 = 0; j0 < N; j0 += TILE) {
+            for (int k0 = 0; k0 < N; k0 += TILE) {
+                int i_end = std::min(i0 + TILE, N);
+                int j_end = std::min(j0 + TILE, N);
+                int k_end = std::min(k0 + TILE, N);
+
+                for (int i = i0; i < i_end; i += 4) {
+                    for (int j = j0; j < j_end; j += 4) {
+                        float32x4_t c0 = vld1q_f32(&C[(i+0)*N + j]);
+                        float32x4_t c1 = vld1q_f32(&C[(i+1)*N + j]);
+                        float32x4_t c2 = vld1q_f32(&C[(i+2)*N + j]);
+                        float32x4_t c3 = vld1q_f32(&C[(i+3)*N + j]);
+
+                        for (int k = k0; k < k_end; ++k) {
+                            float32x4_t b = vld1q_f32(&B[k*N + j]);
+                            c0 = vfmaq_n_f32(c0, b, A[(i+0)*N + k]);
+                            c1 = vfmaq_n_f32(c1, b, A[(i+1)*N + k]);
+                            c2 = vfmaq_n_f32(c2, b, A[(i+2)*N + k]);
+                            c3 = vfmaq_n_f32(c3, b, A[(i+3)*N + k]);
+                        }
+
+                        vst1q_f32(&C[(i+0)*N + j], c0);
+                        vst1q_f32(&C[(i+1)*N + j], c1);
+                        vst1q_f32(&C[(i+2)*N + j], c2);
+                        vst1q_f32(&C[(i+3)*N + j], c3);
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+**Why TILE = 64?** A 64×64 tile is 16 KB. Three tiles = 48 KB, which fits in L1d (64 KB). The inner loops now run almost entirely from L1, cutting access latency from ~10 cycles (L2) to ~4 cycles (L1).
+
+**Why 4×4 register blocking?** Four `float32x4_t` accumulators (c0–c3) hold a 4×4 block of C entirely in NEON registers. Each `vfmaq_n_f32` performs 4 multiply-adds in a single instruction — 4× the work per instruction compared to the scalar version. The four independent accumulators also expose instruction-level parallelism, allowing the out-of-order core to overlap FMA latencies rather than stalling on a single dependency chain.
+
+Run it:
+
+```bash
+./matmul_neon
+```
+
+You should see a further significant speedup over the tiled version.
+
+### Re-profile with ATP
+
+<!-- TODO: ATP profiling command and screenshot -->
+
+Profile `matmul_neon` and look at the Top-Down view:
+
+- **Backend Bound %** should drop further — both memory stalls (L1 hits) and core stalls (SIMD throughput) are addressed.
+- **Retiring %** should be at its highest — more cycles are spent doing useful FP work, and each instruction retires more work.
 - **IPC** should be the best across all three variants.
 
 <!-- TODO: Screenshot -->
@@ -215,28 +237,34 @@ Run all three back-to-back:
 
 ```bash
 ./matmul_naive
-./matmul_tiled_1d
-./matmul_tiled_2d
+./matmul_tiled
+./matmul_neon
 ```
 
-| Variant | Expected Improvement | Why |
-|---------|---------------------|-----|
-| Naive (ijk) | Baseline | Strided B access → constant cache misses |
-| 1D tiled (k-strip) | ~3–5× faster | B strip fits in L2 → fewer L2 misses, but L1 misses remain |
-| 2D tiled (i,j,k) | ~5–10× faster than naive | Working set fits in L1d → near-zero cache misses |
+| Variant | Bottleneck Addressed | Why It Helps |
+|---------|---------------------|--------------|
+| Naive (ijk) | Baseline | Strided B access → LLC misses on nearly every access |
+| 2D tiled | LLC misses → L2 hits | 128×128 tiles fit in L2; data re-used while cache-resident |
+| NEON register-blocked | L1 misses + scalar throughput | 64×64 tiles fit in L1; NEON does 4 FMAs per instruction |
 
 <!-- TODO: ATP side-by-side comparison screenshot showing all three profiles -->
 
 ### What the ATP Top-Down view tells us
 
-| Metric | Naive | 1D Tiled | 2D Tiled |
-|--------|-------|----------|----------|
+| Metric | Naive | 2D Tiled | NEON |
+|--------|-------|----------|------|
 | Backend Bound % | High | Medium | Low |
-| → Memory Bound | Dominant | Reduced | Minimal |
+| → Memory Bound | LLC misses dominate | L1 misses (hitting L2) | Minimal (data in L1) |
+| → Core Bound | Hidden by memory stalls | Visible (scalar FMA) | Reduced (SIMD FMA) |
 | Retiring % | Low | Medium | High |
-| IPC | < 1.0 | ~1–2 | ~2–3+ |
+| IPC | < 1.0 | ~1–2 | ~2–4 |
 
-The progression is clear: by tiling the k dimension first (1D tiling) we reduce L2 misses, then by tiling all dimensions (2D tiling) we fit the working set in L1d. Each step moves the workload from data-starved toward compute-efficient. ATP's Top-Down Methodology makes it straightforward to identify the bottleneck category and verify that each optimisation addressed it.
+The progression is clear:
+1. The naive version is **memory-bound at the LLC level** — the CPU stalls waiting for DRAM.
+2. 2D tiling eliminates LLC misses by keeping tiles in L2, but L1 misses and scalar execution remain — the bottleneck shifts to **L1 memory latency and core throughput**.
+3. NEON register blocking shrinks tiles to fit in L1 and uses SIMD to do 4× more work per instruction — the workload moves from data-starved toward **compute-efficient**.
+
+ATP's Top-Down Methodology makes it straightforward to identify the bottleneck category at each step and verify that each optimisation addressed it.
 
 ---
 
@@ -244,6 +272,6 @@ The progression is clear: by tiling the k dimension first (1D tiling) we reduce 
 
 1. **Start with the Top-Down view.** It tells you *where* to look — don't guess, measure.
 2. **Backend Memory Bound** means the CPU is waiting for data. Fix cache utilisation first.
-3. **1D tiling** (blocking a single loop dimension) is a good first step — it reduces pressure on outer cache levels.
-4. **2D tiling** (blocking all dimensions) pushes performance further by keeping the working set in the fastest level of the memory hierarchy.
+3. **2D tiling** reduces LLC misses by keeping the working set in L2. Look for the Memory Bound sub-category to shift from LLC-dominated to L1-dominated.
+4. **Register blocking with NEON** attacks two remaining bottlenecks at once: shrinking tiles to fit in L1 reduces memory latency, while SIMD intrinsics increase the useful work retired per instruction.
 5. **Always re-profile after each change** to confirm the optimisation had the expected effect. ATP makes this comparison easy.
