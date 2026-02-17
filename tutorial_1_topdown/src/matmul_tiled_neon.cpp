@@ -1,22 +1,24 @@
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
-#include <algorithm>
 #include <vector>
 
+#if defined(__has_include)
+#if __has_include(<arm_neon.h>)
+#include <arm_neon.h>
+#define ATP_HAS_NEON_HEADER 1
+#endif
+#endif
+
 // Dense matrix multiplication: C = A * B
-// Cache-tiled version — the matrix is divided into TILE x TILE blocks
-// so that each block fits in L1/L2 cache. Within each tile the ikj
-// ordering is used for stride-1 access.
-//
-// Graviton3 has 64 KB L1d and 1 MB L2 per core.
-// A tile of 64x64 floats = 16 KB, so three tiles (A, B, C) = 48 KB
-// which fits comfortably in L1d.
+// Tiled + explicit Arm NEON intrinsics in the inner loop.
+// Falls back to scalar code when NEON is unavailable at compile time.
 
 constexpr int TILE = 64;
 
-void matmul_tiled(const float* A, const float* B, float* C, int N) {
+void matmul_tiled_neon(const float* A, const float* B, float* C, int N) {
     std::memset(C, 0, N * N * sizeof(float));
 
     for (int i0 = 0; i0 < N; i0 += TILE) {
@@ -26,26 +28,32 @@ void matmul_tiled(const float* A, const float* B, float* C, int N) {
             int width = j_end - j0;
             for (int k0 = 0; k0 < N; k0 += TILE) {
                 int k_end = std::min(k0 + TILE, N);
-
                 for (int i = i0; i < i_end; ++i) {
                     float* c_row = &C[i * N + j0];
                     for (int k = k0; k < k_end; ++k) {
-                        float a_ik = A[i * N + k];
+                        const float a_ik = A[i * N + k];
                         const float* b_row = &B[k * N + j0];
+
+#if defined(ATP_HAS_NEON_HEADER) && defined(__ARM_NEON)
                         int jj = 0;
-                        for (; jj + 8 <= width; jj += 8) {
-                            c_row[jj + 0] += a_ik * b_row[jj + 0];
-                            c_row[jj + 1] += a_ik * b_row[jj + 1];
-                            c_row[jj + 2] += a_ik * b_row[jj + 2];
-                            c_row[jj + 3] += a_ik * b_row[jj + 3];
-                            c_row[jj + 4] += a_ik * b_row[jj + 4];
-                            c_row[jj + 5] += a_ik * b_row[jj + 5];
-                            c_row[jj + 6] += a_ik * b_row[jj + 6];
-                            c_row[jj + 7] += a_ik * b_row[jj + 7];
+                        for (; jj + 4 <= width; jj += 4) {
+                            float32x4_t c_vec = vld1q_f32(c_row + jj);
+                            float32x4_t b_vec = vld1q_f32(b_row + jj);
+#if defined(__aarch64__)
+                            c_vec = vfmaq_n_f32(c_vec, b_vec, a_ik);
+#else
+                            c_vec = vmlaq_n_f32(c_vec, b_vec, a_ik);
+#endif
+                            vst1q_f32(c_row + jj, c_vec);
                         }
                         for (; jj < width; ++jj) {
                             c_row[jj] += a_ik * b_row[jj];
                         }
+#else
+                        for (int jj = 0; jj < width; ++jj) {
+                            c_row[jj] += a_ik * b_row[jj];
+                        }
+#endif
                     }
                 }
             }
@@ -67,16 +75,19 @@ int main(int argc, char* argv[]) {
     }
 
     auto start = std::chrono::high_resolution_clock::now();
-    matmul_tiled(A.data(), B.data(), C.data(), N);
+    matmul_tiled_neon(A.data(), B.data(), C.data(), N);
     auto end = std::chrono::high_resolution_clock::now();
 
     double elapsed_ms = std::chrono::duration<double, std::milli>(end - start).count();
     double gflops = (2.0 * N * N * N) / (elapsed_ms * 1e6);
 
-    std::cout << "Tiled matmul (" << N << "x" << N << ", tile=" << TILE << ")\n";
+    std::cout << "Tiled + NEON matmul (" << N << "x" << N << ", tile=" << TILE << ")\n";
     std::cout << "  Time:  " << elapsed_ms << " ms\n";
     std::cout << "  GFLOPS: " << gflops << "\n";
     std::cout << "  Check:  C[0]=" << C[0] << " C[N*N-1]=" << C[N * N - 1] << "\n";
+#if !(defined(ATP_HAS_NEON_HEADER) && defined(__ARM_NEON))
+    std::cout << "  Note: built without NEON support; scalar fallback path used.\n";
+#endif
 
     return 0;
 }
