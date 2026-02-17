@@ -28,7 +28,7 @@ void matmul_naive(const float* A, const float* B, float* C, int M, int K, int N)
 }
 
 int main(int argc, char* argv[]) {
-    int M = 512;   // rows of A and C (reduced to limit runtime)
+    int M = 32;   // rows of A and C (reduced to limit runtime)
     int K = 8192;  // cols of A / rows of B
     int N = 8192;  // cols of B and C
 
