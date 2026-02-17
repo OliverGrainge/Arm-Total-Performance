@@ -44,18 +44,18 @@ static void pack_B_tile(const float* B, float* packed,
     }
 }
 
-void matmul_neon(const float* A, const float* B, float* C, int N) {
-    std::memset(C, 0, N * N * sizeof(float));
+void matmul_neon(const float* A, const float* B, float* C, int M, int K, int N) {
+    std::memset(C, 0, M * N * sizeof(float));
 
     // Scratch buffer for one packed B tile (at most TILE × TILE floats)
     std::vector<float> packed_B(TILE * TILE);
 
-    for (int i0 = 0; i0 < N; i0 += TILE) {
+    for (int i0 = 0; i0 < M; i0 += TILE) {
         for (int j0 = 0; j0 < N; j0 += TILE) {
-            for (int k0 = 0; k0 < N; k0 += TILE) {
-                int i_end = std::min(i0 + TILE, N);
+            for (int k0 = 0; k0 < K; k0 += TILE) {
+                int i_end = std::min(i0 + TILE, M);
                 int j_end = std::min(j0 + TILE, N);
-                int k_end = std::min(k0 + TILE, N);
+                int k_end = std::min(k0 + TILE, K);
                 int k_len = k_end - k0;
 
                 // Pack B tile so micro-kernel reads are sequential
@@ -77,10 +77,10 @@ void matmul_neon(const float* A, const float* B, float* C, int N) {
                             float32x4_t b = vld1q_f32(bp_k);
                             bp_k += 4;
                             // Each vfmaq_n_f32: C_row += A[row][k] * B[k][j:j+4]
-                            c0 = vfmaq_n_f32(c0, b, A[(i + 0) * N + k]);
-                            c1 = vfmaq_n_f32(c1, b, A[(i + 1) * N + k]);
-                            c2 = vfmaq_n_f32(c2, b, A[(i + 2) * N + k]);
-                            c3 = vfmaq_n_f32(c3, b, A[(i + 3) * N + k]);
+                            c0 = vfmaq_n_f32(c0, b, A[(i + 0) * K + k]);
+                            c1 = vfmaq_n_f32(c1, b, A[(i + 1) * K + k]);
+                            c2 = vfmaq_n_f32(c2, b, A[(i + 2) * K + k]);
+                            c3 = vfmaq_n_f32(c3, b, A[(i + 3) * K + k]);
                         }
 
                         // Store the 4×4 result back
@@ -97,29 +97,34 @@ void matmul_neon(const float* A, const float* B, float* C, int N) {
 }
 
 int main(int argc, char* argv[]) {
-    int N = 8192;
-    if (argc > 1) N = std::atoi(argv[1]);
+    int M = 512;   // rows of A and C (reduced to limit runtime)
+    int K = 8192;  // cols of A / rows of B
+    int N = 8192;  // cols of B and C
 
-    std::vector<float> A(N * N);
-    std::vector<float> B(N * N);
-    std::vector<float> C(N * N, 0.0f);
+    if (argc > 1) M = std::atoi(argv[1]);
+    if (argc > 2) K = std::atoi(argv[2]);
+    if (argc > 3) N = std::atoi(argv[3]);
 
-    for (int i = 0; i < N * N; ++i) {
+    std::vector<float> A(M * K);
+    std::vector<float> B(K * N);
+    std::vector<float> C(M * N, 0.0f);
+
+    for (int i = 0; i < M * K; ++i)
         A[i] = static_cast<float>(i % 97) * 0.01f;
+    for (int i = 0; i < K * N; ++i)
         B[i] = static_cast<float>(i % 89) * 0.01f;
-    }
 
     auto start = std::chrono::high_resolution_clock::now();
-    matmul_neon(A.data(), B.data(), C.data(), N);
+    matmul_neon(A.data(), B.data(), C.data(), M, K, N);
     auto end = std::chrono::high_resolution_clock::now();
 
     double elapsed_ms = std::chrono::duration<double, std::milli>(end - start).count();
-    double gflops = (2.0 * N * N * N) / (elapsed_ms * 1e6);
+    double gflops = (2.0 * M * K * N) / (elapsed_ms * 1e6);
 
-    std::cout << "NEON matmul (" << N << "x" << N << ", tile=" << TILE << ")\n";
+    std::cout << "NEON matmul (" << M << "x" << K << " * " << K << "x" << N << ", tile=" << TILE << ")\n";
     std::cout << "  Time:  " << elapsed_ms << " ms\n";
     std::cout << "  GFLOPS: " << gflops << "\n";
-    std::cout << "  Check:  C[0]=" << C[0] << " C[N*N-1]=" << C[N * N - 1] << "\n";
+    std::cout << "  Check:  C[0]=" << C[0] << " C[M*N-1]=" << C[M * N - 1] << "\n";
 
     return 0;
 }

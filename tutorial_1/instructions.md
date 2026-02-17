@@ -38,7 +38,7 @@ This produces three executables:
 | `matmul_tiled` | 2D tiling (i,j,k) — working set fits in L2 but not L1 |
 | `matmul_neon`  | L1-fitting tiles + 4×4 NEON register blocking + B-tile packing |
 
-All three compute the same result (`C = A × B` for 16384×16384 float matrices by default). You can pass a custom size as the first argument, e.g. `./matmul_naive 2048`.
+All three compute the same result (`C = A × B` for a 512×8192 × 8192×8192 multiplication by default). The row count of A (M=512) is kept small to limit runtime while preserving the full memory access profile on the large B matrix. You can pass custom dimensions as `./matmul_naive M K N`, e.g. `./matmul_naive 256 4096 4096`.
 
 ---
 
@@ -53,10 +53,10 @@ Run the naive version to get a baseline timing:
 Expected output (times will vary by instance type):
 
 ```
-Naive matmul (16384x16384, <N> reps)
+Naive matmul (512x8192 * 8192x8192)
   Time:  <X> ms
   GFLOPS: <Y>
-  Check:  C[0]=... C[N*N-1]=...
+  Check:  C[0]=... C[M*N-1]=...
 ```
 
 Record the time and GFLOPS — we will compare against the optimised versions later.
@@ -66,12 +66,12 @@ Record the time and GFLOPS — we will compare against the optimised versions la
 The naive kernel in `src/matmul_naive.cpp` is:
 
 ```cpp
-void matmul_naive(const float* A, const float* B, float* C, int N) {
-    for (int i = 0; i < N; ++i) {
+void matmul_naive(const float* A, const float* B, float* C, int M, int K, int N) {
+    for (int i = 0; i < M; ++i) {
         for (int j = 0; j < N; ++j) {
             float sum = 0.0f;
-            for (int k = 0; k < N; ++k) {
-                sum += A[i * N + k] * B[k * N + j]; // B access strides by N
+            for (int k = 0; k < K; ++k) {
+                sum += A[i * K + k] * B[k * N + j]; // B access strides by N
             }
             C[i * N + j] = sum;
         }
@@ -79,7 +79,7 @@ void matmul_naive(const float* A, const float* B, float* C, int N) {
 }
 ```
 
-Each iteration accesses `B[k * N + j]` — jumping by N floats (64 KB for N=16384) on every step. This means every access to B lands in a different cache line. The full B matrix is 16384 × 16384 × 4 = 1 GB, far exceeding the last-level cache (~32 MB on Graviton3). Almost every B access results in an LLC miss and a round-trip to DRAM. The CPU spends most of its time waiting for data from memory rather than doing useful computation.
+Each iteration accesses `B[k * N + j]` — jumping by N floats (32 KB for N=8192) on every step. This means every access to B lands in a different cache line. The full B matrix is 8192 × 8192 × 4 = 256 MB, far exceeding the last-level cache (~32 MB on Graviton3). Almost every B access results in an LLC miss and a round-trip to DRAM. The CPU spends most of its time waiting for data from memory rather than doing useful computation.
 
 ---
 
@@ -113,17 +113,17 @@ To eliminate LLC misses we tile all three loop dimensions (i, j, k). The inner l
 ```cpp
 constexpr int TILE = 128;
 
-void matmul_tiled(const float* A, const float* B, float* C, int N) {
-    std::memset(C, 0, N * N * sizeof(float));
-    for (int i0 = 0; i0 < N; i0 += TILE) {
+void matmul_tiled(const float* A, const float* B, float* C, int M, int K, int N) {
+    std::memset(C, 0, M * N * sizeof(float));
+    for (int i0 = 0; i0 < M; i0 += TILE) {
         for (int j0 = 0; j0 < N; j0 += TILE) {
-            int i_end = std::min(i0 + TILE, N);
+            int i_end = std::min(i0 + TILE, M);
             int j_end = std::min(j0 + TILE, N);
-            for (int k0 = 0; k0 < N; k0 += TILE) {
-                int k_end = std::min(k0 + TILE, N);
+            for (int k0 = 0; k0 < K; k0 += TILE) {
+                int k_end = std::min(k0 + TILE, K);
                 for (int i = i0; i < i_end; ++i) {
                     for (int k = k0; k < k_end; ++k) {
-                        float a_ik = A[i * N + k];
+                        float a_ik = A[i * K + k];
                         for (int j = j0; j < j_end; ++j) {
                             C[i * N + j] += a_ik * B[k * N + j];
                         }
@@ -183,18 +183,18 @@ static void pack_B_tile(const float* B, float* packed,
     }
 }
 
-void matmul_neon(const float* A, const float* B, float* C, int N) {
-    std::memset(C, 0, N * N * sizeof(float));
+void matmul_neon(const float* A, const float* B, float* C, int M, int K, int N) {
+    std::memset(C, 0, M * N * sizeof(float));
 
     // Scratch buffer for one packed B tile (at most TILE × TILE floats)
     std::vector<float> packed_B(TILE * TILE);
 
-    for (int i0 = 0; i0 < N; i0 += TILE) {
+    for (int i0 = 0; i0 < M; i0 += TILE) {
         for (int j0 = 0; j0 < N; j0 += TILE) {
-            for (int k0 = 0; k0 < N; k0 += TILE) {
-                int i_end = std::min(i0 + TILE, N);
+            for (int k0 = 0; k0 < K; k0 += TILE) {
+                int i_end = std::min(i0 + TILE, M);
                 int j_end = std::min(j0 + TILE, N);
-                int k_end = std::min(k0 + TILE, N);
+                int k_end = std::min(k0 + TILE, K);
                 int k_len = k_end - k0;
 
                 // Pack B tile so micro-kernel reads are sequential
@@ -216,10 +216,10 @@ void matmul_neon(const float* A, const float* B, float* C, int N) {
                             float32x4_t b = vld1q_f32(bp_k);
                             bp_k += 4;
                             // Each vfmaq_n_f32: C_row += A[row][k] * B[k][j:j+4]
-                            c0 = vfmaq_n_f32(c0, b, A[(i + 0) * N + k]);
-                            c1 = vfmaq_n_f32(c1, b, A[(i + 1) * N + k]);
-                            c2 = vfmaq_n_f32(c2, b, A[(i + 2) * N + k]);
-                            c3 = vfmaq_n_f32(c3, b, A[(i + 3) * N + k]);
+                            c0 = vfmaq_n_f32(c0, b, A[(i + 0) * K + k]);
+                            c1 = vfmaq_n_f32(c1, b, A[(i + 1) * K + k]);
+                            c2 = vfmaq_n_f32(c2, b, A[(i + 2) * K + k]);
+                            c3 = vfmaq_n_f32(c3, b, A[(i + 3) * K + k]);
                         }
 
                         // Store the 4×4 result back
