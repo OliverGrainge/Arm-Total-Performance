@@ -36,9 +36,9 @@ This produces three executables:
 |--------|-------------|
 | `matmul_naive` | ijk loop order — strided B access causes LLC misses |
 | `matmul_tiled` | 2D tiling (i,j,k) — working set fits in L2 but not L1 |
-| `matmul_neon`  | L1-fitting tiles + 4×4 NEON register blocking |
+| `matmul_neon`  | L1-fitting tiles + 4×4 NEON register blocking + B-tile packing |
 
-All three compute the same result (`C = A × B` for 4096×4096 float matrices by default). You can pass a custom size as the first argument, e.g. `./matmul_naive 2048`.
+All three compute the same result (`C = A × B` for 16384×16384 float matrices by default). You can pass a custom size as the first argument, e.g. `./matmul_naive 2048`.
 
 ---
 
@@ -53,7 +53,7 @@ Run the naive version to get a baseline timing:
 Expected output (times will vary by instance type):
 
 ```
-Naive matmul (4096x4096, <N> reps)
+Naive matmul (16384x16384, <N> reps)
   Time:  <X> ms
   GFLOPS: <Y>
   Check:  C[0]=... C[N*N-1]=...
@@ -79,7 +79,7 @@ void matmul_naive(const float* A, const float* B, float* C, int N) {
 }
 ```
 
-Each iteration accesses `B[k * N + j]` — jumping by N floats (16 KB for N=4096) on every step. This means every access to B lands in a different cache line. The full B matrix is 4096 × 4096 × 4 = 64 MB, far exceeding the last-level cache (~32 MB on Graviton3). Almost every B access results in an LLC miss and a round-trip to DRAM. The CPU spends most of its time waiting for data from memory rather than doing useful computation.
+Each iteration accesses `B[k * N + j]` — jumping by N floats (64 KB for N=16384) on every step. This means every access to B lands in a different cache line. The full B matrix is 16384 × 16384 × 4 = 1 GB, far exceeding the last-level cache (~32 MB on Graviton3). Almost every B access results in an LLC miss and a round-trip to DRAM. The CPU spends most of its time waiting for data from memory rather than doing useful computation.
 
 ---
 
@@ -164,39 +164,70 @@ Profile `matmul_tiled` and compare the Top-Down view to the naive version:
 
 ## 5. Optimisation 2 — Register Blocking with NEON
 
-The tiled version is still limited in two ways: (1) each tile exceeds L1d so accesses pay L2 latency, and (2) each instruction processes only a single float. We fix both by shrinking the tile to fit in L1d and adding a 4×4 NEON micro-kernel. The kernel in `src/matmul_neon.cpp` is:
+The tiled version is still limited in two ways: (1) each tile exceeds L1d so accesses pay L2 latency, and (2) each instruction processes only a single float. We fix both by shrinking the tile to fit in L1d, packing B tiles for sequential access, and adding a 4×4 NEON micro-kernel. The kernel in `src/matmul_neon.cpp` is:
 
 ```cpp
 constexpr int TILE = 64;
 
+// Pack B[k0:k_end][j0:j_end] into micro-panel format.
+// Layout: for each 4-column micro-panel, all k rows are stored
+// contiguously so the micro-kernel streams through them linearly.
+static void pack_B_tile(const float* B, float* packed,
+                        int k0, int k_end, int j0, int j_end, int N) {
+    float* dst = packed;
+    for (int j = j0; j < j_end; j += 4) {
+        for (int k = k0; k < k_end; ++k) {
+            vst1q_f32(dst, vld1q_f32(&B[k * N + j]));
+            dst += 4;
+        }
+    }
+}
+
 void matmul_neon(const float* A, const float* B, float* C, int N) {
     std::memset(C, 0, N * N * sizeof(float));
+
+    // Scratch buffer for one packed B tile (at most TILE × TILE floats)
+    std::vector<float> packed_B(TILE * TILE);
+
     for (int i0 = 0; i0 < N; i0 += TILE) {
         for (int j0 = 0; j0 < N; j0 += TILE) {
             for (int k0 = 0; k0 < N; k0 += TILE) {
                 int i_end = std::min(i0 + TILE, N);
                 int j_end = std::min(j0 + TILE, N);
                 int k_end = std::min(k0 + TILE, N);
+                int k_len = k_end - k0;
 
+                // Pack B tile so micro-kernel reads are sequential
+                pack_B_tile(B, packed_B.data(), k0, k_end, j0, j_end, N);
+
+                // Process the tile in 4×4 micro-blocks
                 for (int i = i0; i < i_end; i += 4) {
+                    const float* bp = packed_B.data();
                     for (int j = j0; j < j_end; j += 4) {
-                        float32x4_t c0 = vld1q_f32(&C[(i+0)*N + j]);
-                        float32x4_t c1 = vld1q_f32(&C[(i+1)*N + j]);
-                        float32x4_t c2 = vld1q_f32(&C[(i+2)*N + j]);
-                        float32x4_t c3 = vld1q_f32(&C[(i+3)*N + j]);
+                        // Load 4×4 block of C into NEON registers
+                        float32x4_t c0 = vld1q_f32(&C[(i + 0) * N + j]);
+                        float32x4_t c1 = vld1q_f32(&C[(i + 1) * N + j]);
+                        float32x4_t c2 = vld1q_f32(&C[(i + 2) * N + j]);
+                        float32x4_t c3 = vld1q_f32(&C[(i + 3) * N + j]);
 
+                        const float* bp_k = bp;
                         for (int k = k0; k < k_end; ++k) {
-                            float32x4_t b = vld1q_f32(&B[k*N + j]);
-                            c0 = vfmaq_n_f32(c0, b, A[(i+0)*N + k]);
-                            c1 = vfmaq_n_f32(c1, b, A[(i+1)*N + k]);
-                            c2 = vfmaq_n_f32(c2, b, A[(i+2)*N + k]);
-                            c3 = vfmaq_n_f32(c3, b, A[(i+3)*N + k]);
+                            // Packed B: sequential read of B[k][j:j+4]
+                            float32x4_t b = vld1q_f32(bp_k);
+                            bp_k += 4;
+                            // Each vfmaq_n_f32: C_row += A[row][k] * B[k][j:j+4]
+                            c0 = vfmaq_n_f32(c0, b, A[(i + 0) * N + k]);
+                            c1 = vfmaq_n_f32(c1, b, A[(i + 1) * N + k]);
+                            c2 = vfmaq_n_f32(c2, b, A[(i + 2) * N + k]);
+                            c3 = vfmaq_n_f32(c3, b, A[(i + 3) * N + k]);
                         }
 
-                        vst1q_f32(&C[(i+0)*N + j], c0);
-                        vst1q_f32(&C[(i+1)*N + j], c1);
-                        vst1q_f32(&C[(i+2)*N + j], c2);
-                        vst1q_f32(&C[(i+3)*N + j], c3);
+                        // Store the 4×4 result back
+                        vst1q_f32(&C[(i + 0) * N + j], c0);
+                        vst1q_f32(&C[(i + 1) * N + j], c1);
+                        vst1q_f32(&C[(i + 2) * N + j], c2);
+                        vst1q_f32(&C[(i + 3) * N + j], c3);
+                        bp += k_len * 4;  // advance to next micro-panel
                     }
                 }
             }
@@ -206,6 +237,8 @@ void matmul_neon(const float* A, const float* B, float* C, int N) {
 ```
 
 **Why TILE = 64?** A 64×64 tile is 16 KB. Three tiles = 48 KB, which fits in L1d (64 KB). The inner loops now run almost entirely from L1, cutting access latency from ~10 cycles (L2) to ~4 cycles (L1).
+
+**Why pack B?** In the tiled version the innermost k-loop accessed `B[k*N+j]` with stride N — one cache-line miss every few iterations. The `pack_B_tile` function copies each B tile into a contiguous micro-panel layout before the micro-kernel runs. After packing, the k-loop reads B sequentially, turning almost every access into an L1d hit.
 
 **Why 4×4 register blocking?** Four `float32x4_t` accumulators (c0–c3) hold a 4×4 block of C entirely in NEON registers. Each `vfmaq_n_f32` performs 4 multiply-adds in a single instruction — 4× the work per instruction compared to the scalar version. The four independent accumulators also expose instruction-level parallelism, allowing the out-of-order core to overlap FMA latencies rather than stalling on a single dependency chain.
 
@@ -245,7 +278,7 @@ Run all three back-to-back:
 |---------|---------------------|--------------|
 | Naive (ijk) | Baseline | Strided B access → LLC misses on nearly every access |
 | 2D tiled | LLC misses → L2 hits | 128×128 tiles fit in L2; data re-used while cache-resident |
-| NEON register-blocked | L1 misses + scalar throughput | 64×64 tiles fit in L1; NEON does 4 FMAs per instruction |
+| NEON register-blocked | L1 misses + scalar throughput + strided B access | 64×64 tiles fit in L1; B packing gives sequential reads; NEON does 4 FMAs per instruction |
 
 <!-- TODO: ATP side-by-side comparison screenshot showing all three profiles -->
 
@@ -262,7 +295,7 @@ Run all three back-to-back:
 The progression is clear:
 1. The naive version is **memory-bound at the LLC level** — the CPU stalls waiting for DRAM.
 2. 2D tiling eliminates LLC misses by keeping tiles in L2, but L1 misses and scalar execution remain — the bottleneck shifts to **L1 memory latency and core throughput**.
-3. NEON register blocking shrinks tiles to fit in L1 and uses SIMD to do 4× more work per instruction — the workload moves from data-starved toward **compute-efficient**.
+3. NEON register blocking shrinks tiles to fit in L1, B-tile packing ensures sequential memory access within the micro-kernel, and SIMD does 4× more work per instruction — the workload moves from data-starved toward **compute-efficient**.
 
 ATP's Top-Down Methodology makes it straightforward to identify the bottleneck category at each step and verify that each optimisation addressed it.
 
@@ -273,5 +306,5 @@ ATP's Top-Down Methodology makes it straightforward to identify the bottleneck c
 1. **Start with the Top-Down view.** It tells you *where* to look — don't guess, measure.
 2. **Backend Memory Bound** means the CPU is waiting for data. Fix cache utilisation first.
 3. **2D tiling** reduces LLC misses by keeping the working set in L2. Look for the Memory Bound sub-category to shift from LLC-dominated to L1-dominated.
-4. **Register blocking with NEON** attacks two remaining bottlenecks at once: shrinking tiles to fit in L1 reduces memory latency, while SIMD intrinsics increase the useful work retired per instruction.
+4. **Register blocking with NEON and B-tile packing** attacks three remaining bottlenecks at once: shrinking tiles to fit in L1 reduces memory latency, packing B tiles ensures sequential access within the micro-kernel, and SIMD intrinsics increase the useful work retired per instruction.
 5. **Always re-profile after each change** to confirm the optimisation had the expected effect. ATP makes this comparison easy.

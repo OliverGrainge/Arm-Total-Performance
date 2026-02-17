@@ -109,19 +109,14 @@ int main(int argc, char* argv[]) {
         B[i] = static_cast<float>(i % 89) * 0.01f;
     }
 
-    int reps = 0;
     auto start = std::chrono::high_resolution_clock::now();
-    std::chrono::high_resolution_clock::time_point end;
-    do {
-        matmul_neon(A.data(), B.data(), C.data(), N);
-        ++reps;
-        end = std::chrono::high_resolution_clock::now();
-    } while (std::chrono::duration<double>(end - start).count() < 5.0);
+    matmul_neon(A.data(), B.data(), C.data(), N);
+    auto end = std::chrono::high_resolution_clock::now();
 
     double elapsed_ms = std::chrono::duration<double, std::milli>(end - start).count();
-    double gflops = (2.0 * N * N * N * reps) / (elapsed_ms * 1e6);
+    double gflops = (2.0 * N * N * N) / (elapsed_ms * 1e6);
 
-    std::cout << "NEON matmul (" << N << "x" << N << ", tile=" << TILE << ", " << reps << " reps)\n";
+    std::cout << "NEON matmul (" << N << "x" << N << ", tile=" << TILE << ")\n";
     std::cout << "  Time:  " << elapsed_ms << " ms\n";
     std::cout << "  GFLOPS: " << gflops << "\n";
     std::cout << "  Check:  C[0]=" << C[0] << " C[N*N-1]=" << C[N * N - 1] << "\n";
