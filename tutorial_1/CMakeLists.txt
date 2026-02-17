@@ -9,21 +9,18 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # -g for debug symbols so ATP can map samples back to source lines.
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -g")
 
-add_executable(matmul_naive   src/matmul_naive.cpp)
-add_executable(matmul_reordered src/matmul_reordered.cpp)
-add_executable(matmul_tiled   src/matmul_tiled.cpp)
-add_executable(matmul_tiled_neon src/matmul_tiled_neon.cpp)
+add_executable(matmul_naive     src/matmul_naive.cpp)
+add_executable(matmul_tiled_1d  src/matmul_tiled_1d.cpp)
+add_executable(matmul_tiled_2d  src/matmul_tiled_2d.cpp)
 
-# Keep naive/reordered/tiled mostly scalar so progression reflects memory
-# optimisations first, then explicit NEON in the final step.
+# Disable auto-vectorisation on all targets so the progression reflects
+# memory optimisations only (no hidden SIMD from the compiler).
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
-    target_compile_options(matmul_naive PRIVATE -fno-tree-vectorize)
-    target_compile_options(matmul_reordered PRIVATE -fno-tree-vectorize)
-    target_compile_options(matmul_tiled PRIVATE -O3 -fno-tree-vectorize)
-    target_compile_options(matmul_tiled_neon PRIVATE -O3)
+    target_compile_options(matmul_naive     PRIVATE -fno-tree-vectorize)
+    target_compile_options(matmul_tiled_1d  PRIVATE -fno-tree-vectorize)
+    target_compile_options(matmul_tiled_2d  PRIVATE -fno-tree-vectorize)
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    target_compile_options(matmul_naive PRIVATE -fno-vectorize -fno-slp-vectorize)
-    target_compile_options(matmul_reordered PRIVATE -fno-vectorize -fno-slp-vectorize)
-    target_compile_options(matmul_tiled PRIVATE -O3 -fno-vectorize -fno-slp-vectorize)
-    target_compile_options(matmul_tiled_neon PRIVATE -O3)
+    target_compile_options(matmul_naive     PRIVATE -fno-vectorize -fno-slp-vectorize)
+    target_compile_options(matmul_tiled_1d  PRIVATE -fno-vectorize -fno-slp-vectorize)
+    target_compile_options(matmul_tiled_2d  PRIVATE -fno-vectorize -fno-slp-vectorize)
 endif()
