@@ -23,7 +23,7 @@
 //
 // Expected ATP profile: high Retiring %, low Backend Bound.
 
-constexpr int TILE = 64;
+constexpr int TILE = 128;
 
 void matmul_neon(const float* A, const float* B, float* C, int N) {
     std::memset(C, 0, N * N * sizeof(float));
