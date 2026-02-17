@@ -48,7 +48,7 @@ void matmul_tiled(const float* A, const float* B, float* C, int M, int K, int N)
 int main(int argc, char* argv[]) {
     int M = 256;   // rows of A and C (reduced to limit runtime)
     int K = 8192;  // cols of A / rows of B
-    int N = 1024;  // cols of B and C
+    int N = 2048;  // cols of B and C
 
     if (argc > 1) M = std::atoi(argv[1]);
     if (argc > 2) K = std::atoi(argv[2]);
