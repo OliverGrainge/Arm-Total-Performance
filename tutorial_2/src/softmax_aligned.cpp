@@ -46,7 +46,7 @@ static float pass_exp(float* __restrict__ tmp,
     input = static_cast<const float*>(__builtin_assume_aligned(input, 64));
     float sum = 0.0f;
     for (int i = 0; i < N; ++i) {
-        tmp[i] = std::expf(input[i] - max_val);
+        tmp[i] = std::exp(input[i] - max_val);
         sum   += tmp[i];
     }
     return sum;

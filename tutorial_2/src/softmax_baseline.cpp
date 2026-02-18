@@ -37,7 +37,7 @@ void softmax_scale(float* output, const float* input,
     //       this loop remains scalar in all three variants.
     float sum = 0.0f;
     for (int i = 0; i < N; ++i) {
-        output[i] = std::expf(input[i] - max_val);
+        output[i] = std::exp(input[i] - max_val);
         sum += output[i];
     }
 
