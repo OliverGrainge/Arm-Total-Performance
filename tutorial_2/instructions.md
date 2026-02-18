@@ -1,203 +1,194 @@
-# Tutorial 2: Memory Access Recipe with Source Code Inspector
+# Tutorial 2: Memory Access Recipe - Source-Guided Optimization with `__restrict__`
 
-This tutorial demonstrates a clean memory-access optimization flow using a simple **STREAM-style triad** kernel:
+The goal of this tutorial is to show how **Arm Total Performance (ATP)** is used to optimize a **memory-bound** C++ workload on AWS Graviton, not by guesswork, but by mapping profiler evidence directly to source code.
+
+The method in this tutorial is straightforward: run ATP **Memory Access** to identify where memory latency is coming from and which source line is hot, open ATP **Source Code Inspector** on that line to inspect the generated instruction/access pattern, apply a source-level optimization (`__restrict__`) to remove aliasing uncertainty, and then re-run the same recipe to verify that the same line maps to a more efficient vectorized memory-access pattern.
+
+The workload is a STREAM-style triad:
 
 ```cpp
 out[i] = a[i] + alpha * b[i]
 ```
 
-You will profile three versions of the same operation:
+You will run one complete performance engineering loop in this tutorial: baseline profile, source-level diagnosis, optimization, and re-profile verification.
 
-1. **Baseline**: no pointer annotations (scalar baseline for comparison).
-2. **`__restrict__`**: explicit no-alias contract to unlock vectorization.
-3. **Aligned API-preserving variant**: internal `__builtin_assume_aligned(..., 64)` plus internal split implementation, while keeping the public function signature unchanged.
 
-This is intentionally not ML-specific. It is memory-bound and gives very clear signals in ATP's **Memory Access** recipe and **Source Code Inspector**.
-
-## Why this workload is better for Memory Access
-
-- No transcendental math (`exp`, `log`, etc.) to hide memory effects.
-- One hot source line maps directly to load/store behavior.
-- Source changes (`__restrict__`, alignment assumptions) are easy to correlate with instruction changes in disassembly.
-
-## Prerequisites
-
-- AWS Graviton 2/3 instance
-- GCC 9+ or Clang 14+
-- CMake 3.16+
-- Arm Total Performance installed and configured
+**Prerequisites:** AWS Graviton 2/3 instance, GCC 9+ or Clang 14+, CMake 3.16+, ATP installed/configured.
 
 ---
 
-## 1. Build
+## Background: Why Memory Access + Source Inspector
+
+The Memory Access recipe uses Arm SPE sampling to show where loads/stores are serviced (L1/L2/LLC/DRAM) and where latency accumulates. For memory-bound code, this gives faster diagnosis than guessing from wall-clock time alone.
+
+Source Code Inspector closes the loop by showing what instruction pattern is attached to the hot source line. In this tutorial, that line is the triad update statement. You will use ATP to confirm the transition from scalar memory operations to vectorized memory operations after adding `__restrict__`.
+
+---
+
+## 1. Build the code
 
 ```bash
 cd tutorial_2
 mkdir -p build && cd build
 cmake ..
-make -j$(nproc)
+make -j4
 ```
 
-Executables produced:
+This builds two binaries:
 
-- `triad_baseline`
-- `triad_restrict`
-- `triad_aligned`
+- `triad_baseline` (`-O2 -g -fno-tree-vectorize`)
+- `triad_restrict` (`-O2 -g -ftree-vectorize`)
 
-Run all three once to confirm they produce similar checksums:
+Run both once to confirm correctness:
 
 ```bash
 ./triad_baseline
 ./triad_restrict
-./triad_aligned
 ```
+
+Checksums must match.
 
 ---
 
-## 2. Profile the Baseline
+## 2. Profile baseline with Memory Access
 
-### Step 1: Run Memory Access recipe
+Run baseline once in ATP to establish the memory behavior.
 
-In ATP, choose **Recipes -> Memory Access** and run it against `triad_baseline`.
+### Step 1: Configure and run the recipe
 
-### Step 2: Open the hot function
+In ATP:
 
-In **Functions** (or **Call Stack**), select the hot function (`triad`), then open source view:
+1. Open **Recipes**.
+2. Select **Memory Access**.
+3. Set workload to launch `triad_baseline`.
+4. Confirm recipe status is ready.
+5. Click **Run Recipe**.
 
-- double-click the function, or
-- right-click and select **View Source Code**.
+Screenshot to capture:
 
-If prompted, click **Specify Root Directory** and point ATP to this repository path.
+<img src="assets/t2_baseline_recipe_setup.png" width="850" alt="Memory Access recipe setup for triad_baseline"/>
 
-### Step 3: Inspect hot source line and disassembly
+### Step 2: Identify the hot function/line
 
-Focus on:
+Open the Functions (or Call Stack) view and select `triad`. Then open source:
+
+- Double-click function, or
+- Right-click -> **View Source Code**.
+
+If ATP asks, set the repository root directory.
+
+Screenshot to capture:
+
+<img src="assets/t2_baseline_functions.png" width="850" alt="Functions view showing triad hotspot in baseline"/>
+
+### Step 3: Inspect baseline source mapping
+
+Focus on the hot source line:
 
 ```cpp
 out[i] = a[i] + alpha * b[i];
 ```
 
-In baseline, you should see scalar-style instructions associated with this line (single-element loads/stores) because vectorization is intentionally disabled for this binary.
+Baseline expectation:
+
+- Scalar load/store pattern (`ldr s` / `str s` style mapping on AArch64).
+- Higher instruction density per element.
+- Memory-access-heavy behavior on that one source line.
+
+Screenshot to capture:
+
+<img src="assets/t2_baseline_source.png" width="850" alt="Source Code Inspector baseline triad line"/>
+
+Diagnosis at this point: the hot memory behavior is concentrated on the triad line, and the baseline emits scalar per-element work.
 
 ---
 
-## 3. Fix 1: `__restrict__`
+## 3. Apply source optimization: `__restrict__`
 
-Open `src/triad_restrict.cpp`. The only semantic change is pointer contracts:
+Now inspect the optimized variant in `src/triad_restrict.cpp`:
 
 ```cpp
-void triad(float* __restrict__ out,
-           const float* __restrict__ a,
-           const float* __restrict__ b,
-           float alpha, int n)
+static void triad(float* __restrict__ out,
+                  const float* __restrict__ a,
+                  const float* __restrict__ b,
+                  float alpha, int n) {
+    for (int i = 0; i < n; ++i)
+        out[i] = a[i] + alpha * b[i];
+}
 ```
 
-Re-profile `triad_restrict` with Memory Access and inspect the same source line. You should now observe vector instructions (`v` registers, e.g. `ld1/st1/fmla` patterns), indicating widened memory operations.
-
-What to confirm in Source Code Inspector:
-
-- Same hot source line
-- Lower instruction count pressure per element
-- Vector load/store behavior replacing scalar access behavior
+`__restrict__` tells the compiler these pointers do not alias. That enables safe auto-vectorization of the same source loop.
 
 ---
 
-## 4. Fix 2: Preserve Public API + Assume Alignment
+## 4. Re-profile restrict variant
 
-Open `src/triad_aligned.cpp`.
+Run the same Memory Access workflow on `triad_restrict`.
 
-This variant keeps the public API unchanged and pushes optimization assumptions into an internal implementation:
+### Step 1: Run Memory Access on `triad_restrict`
 
-- internal `triad_impl` uses `__restrict__`
-- pointers are marked with `__builtin_assume_aligned(ptr, 64)`
-- arrays are allocated with 64-byte alignment
+Screenshot to capture:
 
-Re-profile `triad_aligned` and inspect the same line in the inspector. You should again see vectorized memory ops, now with explicit alignment guarantees that can reduce alignment handling overhead.
+<img src="assets/t2_restrict_recipe_setup.png" width="850" alt="Memory Access recipe setup for triad_restrict"/>
 
----
+### Step 2: Inspect the same source line
 
-## 5. What to Report in Tutorial 2
+Open `triad` in Source Code Inspector and compare the exact same line:
 
-For your brief, report this exact mapping:
+```cpp
+out[i] = a[i] + alpha * b[i];
+```
 
-1. **Source change**: add `__restrict__` (and then alignment assumptions).
-2. **Compiler output change**: scalar memory ops -> vector memory ops.
-3. **Hardware/access view change**: Memory Access + Source Code Inspector show improved access pattern on the same source line.
+What to verify:
 
-Suggested evidence table:
+- Vector instruction mapping (`ldr q` / `str q`, `fmla v*.4s` style).
+- Fewer instructions per processed element.
+- Improved throughput and reduced runtime.
 
-| Variant | Source change | Inspector/disassembly signal | Runtime/BW trend |
-|---|---|---|---|
-| Baseline | none | scalar load/store pattern on hot line | lowest |
-| Restrict | `__restrict__` pointers | vector load/store + fused multiply-add style pattern | improved |
-| Aligned | internal restrict + 64B alignment assumptions | vector pattern maintained, cleaner aligned access behavior | similar or best |
+Screenshot to capture:
 
----
+<img src="assets/t2_restrict_source.png" width="850" alt="Source Code Inspector restrict triad line"/>
 
-## 6. Notes
+Optional screenshot (if you open assembly-side details):
 
-- Baseline is intentionally compiled with vectorization disabled so the before/after difference is visible in ATP.
-- Use large enough `N` and iterations (defaults are already tuned) to collect stable SPE samples.
-- If Source Code Inspector cannot open files, ensure debug symbols are enabled (`-g`) and host source path matches the profiled binary.
+<img src="assets/t2_restrict_disassembly.png" width="850" alt="Disassembly evidence for vectorized restrict loop"/>
 
 ---
 
-## 7. ATP Checkpoints and Screenshot Placeholders
+## 5. Compare results and report
 
-Use this section as a capture checklist while running ATP. Add screenshots under `tutorial_2/assets/` and paste short observations beneath each item.
+Use your run outputs plus ATP observations in this table:
 
-### A. Baseline (`triad_baseline`)
-
-- Checkpoint: Memory Access recipe configured for `triad_baseline`.
-- Screenshot file: `assets/t2_baseline_recipe_setup.png`
-- Note: confirm target path and recipe options.
-
-- Checkpoint: Functions view with `triad` as hot function.
-- Screenshot file: `assets/t2_baseline_functions.png`
-- Note: record sample count / contribution for `triad`.
-
-- Checkpoint: Source Code Inspector on `out[i] = a[i] + alpha * b[i];`.
-- Screenshot file: `assets/t2_baseline_source.png`
-- Note: capture scalar-style load/store pattern.
-
-### B. Restrict (`triad_restrict`)
-
-- Checkpoint: Memory Access recipe configured for `triad_restrict`.
-- Screenshot file: `assets/t2_restrict_recipe_setup.png`
-- Note: same run parameters as baseline.
-
-- Checkpoint: Source Code Inspector on same source line.
-- Screenshot file: `assets/t2_restrict_source.png`
-- Note: capture vector instruction evidence (`v` registers / `ld1` / `st1` / `fmla` style pattern).
-
-- Checkpoint: Disassembly snippet for hot line.
-- Screenshot file: `assets/t2_restrict_disassembly.png`
-- Note: compare against baseline scalar pattern.
-
-### C. Aligned (`triad_aligned`)
-
-- Checkpoint: Memory Access recipe configured for `triad_aligned`.
-- Screenshot file: `assets/t2_aligned_recipe_setup.png`
-- Note: same run parameters as baseline/restrict.
-
-- Checkpoint: Source Code Inspector on same source line.
-- Screenshot file: `assets/t2_aligned_source.png`
-- Note: confirm vector pattern is maintained.
-
-- Checkpoint: Memory access/address behavior view (if available in your ATP build).
-- Screenshot file: `assets/t2_aligned_memory_view.png`
-- Note: record any aligned/regular stride characteristics visible in UI.
-
-### D. Final Comparison Table (fill in)
-
-| Variant | Hot line instruction pattern | Key inspector observation | Time (ms) | Bandwidth (GB/s) |
+| Variant | Source change | Source Inspector instruction pattern | Time (ms) | Bandwidth (GB/s) |
 |---|---|---|---:|---:|
-| Baseline | [fill] | [fill] | [fill] | [fill] |
-| Restrict | [fill] | [fill] | [fill] | [fill] |
-| Aligned | [fill] | [fill] | [fill] | [fill] |
+| Baseline | none | scalar (`ldr s` / `str s`) | [fill] | [fill] |
+| Restrict | `__restrict__` pointers | vector (`ldr q` / `fmla v*.4s` / `str q`) | [fill] | [fill] |
 
-### E. Brief-ready conclusion template
+Expected trend on Graviton 3:
 
-Use this wording template in your write-up:
+- Baseline around ~31 GB/s
+- Restrict around ~58 GB/s
+- Roughly 1.8-2.0x throughput improvement
 
-`Using ATP Memory Access with Source Code Inspector, we mapped a source-level aliasing/alignment change to a measurable change in memory instruction behavior on the same hot line. The baseline showed [scalar pattern], adding __restrict__ changed this to [vector pattern], and adding alignment assumptions preserved/improved this behavior with [alignment observation]. This correlated with runtime/bandwidth moving from [X] to [Y] to [Z].`
+Use this conclusion template:
+
+> Using ATP Memory Access and Source Code Inspector, we mapped a source-level aliasing change (`__restrict__`) to a measurable change in memory instruction behavior on the same hot line. Baseline showed scalar load/store behavior, while restrict enabled vectorized NEON operations and higher effective memory throughput.
+
+---
+
+## 6. Required screenshots checklist
+
+- [ ] `assets/t2_baseline_recipe_setup.png`
+- [ ] `assets/t2_baseline_functions.png`
+- [ ] `assets/t2_baseline_source.png`
+- [ ] `assets/t2_restrict_recipe_setup.png`
+- [ ] `assets/t2_restrict_source.png`
+- [ ] `assets/t2_restrict_disassembly.png` (optional but recommended)
+
+---
+
+## Notes
+
+- Keep `-g` enabled so ATP can resolve source locations.
+- Keep problem size large enough (`N=8M`, `iters=200` defaults) for stable sampling.
+- For this tutorial, the key validation is not only faster runtime, but visible mapping from source change -> instruction/access pattern change in ATP.

@@ -8,8 +8,6 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -g")
 
 add_executable(triad_baseline src/triad_baseline.cpp)
 add_executable(triad_restrict src/triad_restrict.cpp)
-add_executable(triad_aligned  src/triad_aligned.cpp)
 
 target_compile_options(triad_baseline PRIVATE -fno-tree-vectorize)
 target_compile_options(triad_restrict PRIVATE -ftree-vectorize)
-target_compile_options(triad_aligned  PRIVATE -ftree-vectorize)
