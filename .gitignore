@@ -5,6 +5,9 @@ CLAUDE.md
 SoW*
 SOW*
 
+# AWS / local startup script (optional, not committed)
+aws-startup.sh
+
 # Build directories
 build/
 **/build/
