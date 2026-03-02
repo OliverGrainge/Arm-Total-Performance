@@ -1,14 +1,16 @@
 # Tutorial 1: Top-Down Performance Analysis Methodology
 
-In this tutorial you will learn to use **Arm Total Performance (ATP)** to diagnose and fix performance bottlenecks in a C++ workload. The example workload is dense matrix multiplication (`C = A x B`) in single-precision floating point, but the methodology applies to any compute-intensive code.
+In this tutorial, you will learn how to apply a Top-Down performance analysis workflow with **Arm Total Performance (ATP)** on Graviton to find computational bottlenecks and improve the performance of your code. The example workload is this tutorial is dense matrix multiplication (`C = A x B`) in single-precision floating point, but the goal is to teach a method you can transfer to other workloads and use to optimise your own code.
 
-You will work through ATP's core diagnostic loop three times: **profile, diagnose, fix, re-profile**. Each iteration teaches you to read a different part of the ATP interface:
+You will improve the workload step by step by repeating ATP's core optimisation loop: **profile, diagnose, fix, re-profile**. Across three iterations, you will use ATP to identify the main bottleneck, apply a targeted code change, and then verify how the performance profile shifts after each optimisation.
+
+Along the way, you will learn how to read several key parts of the ATP interface:
 
 1. Run the Topdown recipe and read the Summary view to identify the bottleneck category.
-2. Drill into cache effectiveness in the Functions tab to find which cache level is responsible.
+2. Narrow the diagnosis using cache effectiveness in the Functions tab to find which cache level is responsible.
 3. Check the Speculative Operation Mix in the Retiring breakdown to assess SIMD utilisation.
 
-By the end you will be comfortable using ATP's Topdown recipe to guide optimisation decisions on Graviton.
+By the end, you should be comfortable using ATP's Topdown recipe to guide optimisation decisions and validate performance improvements on Graviton.
 
 **Prerequisites:** AWS Graviton 2/3 instance, C++ compiler (g++ 9+ or clang++ 14+), CMake 3.16+, ATP installed and configured.
 
@@ -30,19 +32,21 @@ Before opening ATP, it helps to understand what the numbers mean. You can skip t
 
 ### The four buckets
 
-Each cycle, the CPU has a fixed number of *slots*, which is the maximum number of micro-ops it can issue. ATP's Topdown recipe accounts for every slot in every cycle and places each one into one of four mutually exclusive categories.
+The Topdown method starts from a simple idea: in every CPU cycle, the core has a limited opportunity to make progress. ATP models that opportunity as a set of *slots*. You can think of a slot as one place where a micro-op could have been issued.
 
-**Retiring** represents slots doing useful work. A higher Retiring percentage is better. When Retiring dominates, you should check the instruction mix to see whether you are using SIMD.
+ATP then accounts for every slot and asks what happened to it. Did it turn into useful work, sit idle because the frontend could not supply work, get held up in the backend, or get spent on speculative work that was later discarded? These outcomes are grouped into four mutually exclusive buckets.
 
-**Frontend Bound** means the frontend cannot supply micro-ops fast enough. When this dominates, look at instruction-cache misses and branch MPKI.
+**Retiring** represents slots used for instructions that complete and contribute to the final result. When Retiring is high, a larger share of the CPU's issue capacity is being converted into useful work.
 
-**Backend Bound** means the backend is stalled waiting for data or execution units. When this dominates, drill into whether the stall comes from memory latency or execution unit contention.
+**Frontend Bound** means the frontend is not supplying micro-ops quickly enough to keep the rest of the pipeline busy. In practical terms, the core could execute more work, but the instruction stream is not arriving fast enough.
 
-**Bad Speculation** represents slots wasted on wrong-path instructions after a mispredicted branch. When this is high, check the branch misprediction ratio.
+**Backend Bound** means the work has made it past the frontend, but it cannot complete quickly enough in the backend. This usually means instructions are waiting on data, such as cache misses, or waiting for execution resources that are already busy.
 
-### The drill-down hierarchy
+**Bad Speculation** represents slots spent on work that does not contribute to the final result because it is later thrown away. A common example is the CPU following the wrong path after a branch prediction and then having to discard that speculative work.
 
-The power of Top-Down is that you never guess. You follow the dominant bucket downward through the hierarchy:
+### The narrowing hierarchy
+
+A Top-Down analysis works by moving from broad categories to more specific ones. You begin with the bucket that accounts for the largest share of slots, then narrow the diagnosis to understand what sits underneath it:
 
 ```
 Topdown
@@ -52,15 +56,19 @@ Topdown
 └── Retiring        → instruction mix (scalar vs SIMD, integer vs FP)
 ```
 
-If Backend Bound dominates, drill into Memory Bound vs Core Bound. If Memory Bound, look at which cache level is missing. That tells you exactly what to fix.
+For example, if **Backend Bound** is the largest bucket, the next question is whether those slots are being lost to the memory system or to pressure on the execution units. If the problem is memory-related, the next level helps you see whether the delays are mainly coming from L1, L2, LLC, or DRAM. Each step makes the diagnosis more specific and helps you choose a sensible optimisation direction.
 
 ### ATP's recipes and when to use them
 
-ATP provides several complementary recipes. **CPU Cycle Hotspots** answers the question of *where* time is spent and is best used first to find your hot functions. **Topdown** answers *why* a function is slow and should be used second to diagnose the bottleneck category. **Memory Access** answers which cache level is stalling you and is useful for confirming a memory-bound diagnosis using SPE data. **Instruction Mix** tells you whether your code is actually vectorised and is most useful after an optimisation to verify SIMD usage.
+The Topdown view is one way of looking at a program in ATP, not the only one. ATP provides several recipes that answer different performance questions, and they are often most useful when used together.
 
-This tutorial focuses on the **Topdown** recipe, which surfaces enough information to guide each optimisation step.
+**CPU Cycle Hotspots** shows *where* the program is spending CPU time, so it is useful for identifying the functions worth investigating. **Topdown** shows *why* those functions are slow by breaking slots into the categories described above. **Memory Access** gives a more detailed view of memory behaviour and is useful when Topdown suggests a memory-related bottleneck. **Instruction Mix** shows what kinds of instructions are being executed and is useful for checking whether code is scalar or vectorised.
+
+In this tutorial, **Topdown** is the main recipe because it provides the primary diagnostic signal for each optimisation step. The other recipes appear as supporting views when they help confirm or explain what Topdown is showing.
 
 > **Note on measurement bias:** ATP's sampling reports Retiring slightly low and Frontend/Bad Speculation slightly high. Use values for **relative comparison between runs**, not as absolute ground truth.
+
+With that background in place, the next step is to build and run the example on your Graviton instance. We will start with the baseline implementation, profile it in ATP, and then use the results to guide each optimisation pass.
 
 ---
 
@@ -85,7 +93,16 @@ Run the naive implementation to get a baseline timing:
 ./matmul_naive
 ```
 
-The naive kernel is a textbook three-loop matrix multiply. Below is the full kernel from `src/matmul_naive.cpp`:
+You should see output in this form, with the exact timing and GFLOPS depending on your instance type and system state:
+
+```text
+Naive matmul (256x1024 * 1024x8192)
+  Time:  4194.27 ms
+  GFLOPS: 1.02401
+  Check:  C[0]=210.939 C[M*N-1]=211.055
+```
+
+The naive kernel is a textbook three-loop matrix multiply. Below is the function from `src/matmul_naive.cpp`:
 
 ```cpp
 void matmul_naive(const float* A, const float* B, float* C, int M, int K, int N) {
@@ -101,7 +118,7 @@ void matmul_naive(const float* A, const float* B, float* C, int M, int K, int N)
 }
 ```
 
-The key access pattern is the innermost load `B[k*N + j]`: as `k` increments, the address jumps by `N` floats each time, which is a large stride of 32 KB per iteration.
+The key access pattern is the innermost load `B[k*N + j]`: as `k` increments, the address jumps by `N` floats each time.
 
 We suspect this is slow, but *why*? This is where ATP comes in.
 
@@ -117,35 +134,37 @@ ATP will collect hardware performance counter data for approximately 30 seconds.
 
 <img src="assets/naive_topdown.png" width="850" alt="ATP Topdown summary for naive matmul"/>
 
-Look at the four top-level bars. **Backend Bound** dominates at roughly 70%. This tells you that the frontend is supplying micro-ops adequately, but the backend cannot execute them fast enough because it is stalled. Retiring is low at around 15%, meaning most of the CPU's capacity is wasted waiting rather than doing useful work.
+Look at the four top-level bars. **Backend Bound** dominates at roughly 85%. This tells you that the frontend is supplying micro-ops adequately, but the backend cannot execute them fast enough because it is stalled. Retiring is low at around 15%, meaning most of the CPU's capacity is wasted waiting rather than doing useful work.
 
-**Your diagnosis so far:** The bottleneck is in the backend. But *what* in the backend? Memory latency? Execution unit contention? You need to drill down.
+**Your diagnosis so far:** The bottleneck is in the backend. But *what* in the backend? Memory latency? Execution unit contention? The next step is to narrow it down.
 
-### Step 3: Drill into cache effectiveness
+### Step 3: Inspect the backend breakdown
 
-Look below to the **Backend Summary Breakdown**. ATP shows cache effectiveness metrics for this function:
+From the Summary view, we already know the workload is strongly **Backend Bound**. The next step is to inspect the cache effectiveness metrics for this function to see whether those backend stalls are likely to be coming from the memory system:
 
 <img src="assets/naive_cache_effectiveness.png" width="850" alt="Cache miss ratios for naive matmul"/>
 
 The miss ratios tell a clear story. At **L1D**, nearly half of all data loads miss the cache (around 49%). Of those that reach **L2**, roughly a quarter miss again (24%). At the **LLC**, the situation is worst: around 61% of accesses miss, meaning the data has to travel all the way to DRAM.
 
-The LLC miss ratio is the critical number here. A 61% miss rate at the last-level cache means the majority of memory requests cost hundreds of cycles each. This is why Backend Bound is so high.
+The LLC miss ratio is the critical number here. A 61% miss rate at the last-level cache means the majority of memory requests cost hundreds of cycles each. This is why the number of slots occupied by the backend is so high.
 
 ### Step 4: Connect the diagnosis to the code
 
-Now you know *what* the bottleneck is: LLC misses caused by the `B[k*N + j]` access pattern, which strides by N = 8192 elements (32 KB) per k-iteration. The full B matrix is 256 MB, far exceeding the ~32 MB LLC. The hardware prefetcher cannot track these large strides, so every access goes to DRAM.
+Now you know *what* the bottleneck is: LLC misses caused by the `B[k*N + j]` access pattern. In this tutorial's default problem size, `N = 8192`, so each increment of `k` moves to the next row of `B` and jumps ahead by 8192 `float` elements in memory. That creates a large strided access pattern rather than a contiguous one.
+
+The full `B` matrix is 256 MB, far exceeding the ~32 MB LLC. With accesses spread so widely through memory, the cache cannot retain the needed data effectively, and many of those loads end up going to DRAM.
 
 **Complete diagnosis: Backend Bound -> Memory Bound -> LLC misses, caused by strided B access.**
 
-This is the Top-Down workflow: Summary -> dominant bucket -> drill down -> connect to code.
+Now that the bottleneck is clear, the next step is to change the loop structure so the working set stays in cache.
 
 ---
 
 ## 3. Fix and Re-Profile: 2D Tiling
 
-The diagnosis says to keep the working set in cache. The standard fix is **2D tiling**: partition the loops so the inner computation works on sub-blocks small enough to fit in L2.
+The solution to LLC misses is to keep the working set in cache. For matrix multiplication, the standard way to do this is **2D tiling**: split the loops into smaller blocks so the inner computation reuses sub-blocks of `A`, `B`, and `C` while they still fit in L2.
 
-The tiled kernel in `src/matmul_tiled.cpp` uses TILE=128. A 128x128 tile of floats is 64 KB; three tiles (A, B, and C sub-blocks) total 192 KB, fitting comfortably in Graviton3's 1 MB L2 cache:
+The tiled kernel in `src/matmul_tiled.cpp` uses `TILE=128`. A `128x128` tile of `float`s is 64 KB, so one tile each from `A`, `B`, and `C` totals about 192 KB, which fits comfortably within Graviton3's 1 MB L2 cache:
 
 ```cpp
 constexpr int TILE = 128;
@@ -177,21 +196,21 @@ Run the Topdown recipe again, this time on `matmul_tiled`. Always re-profile aft
 
 Comparing the Summary view with the naive run, the improvement is dramatic. **Retiring** jumped from ~15% to 66.5%, meaning the pipeline is now doing useful work most of the time. **Backend Bound** dropped from ~70% to 18.9%, showing that memory stalls have been largely eliminated.
 
-Now check cache effectiveness in the Functions tab:
+To confirm that this shift really comes from better locality, check cache effectiveness in the Functions tab:
 
 <img src="assets/tiled_cache_effectiveness.png" width="850" alt="Cache metrics for tiled matmul"/>
 
 The cache numbers confirm the fix worked. L1D misses dropped from ~49% to just 2.4% because the inner loop's working set now fits in L1. L2 misses fell to effectively 0% because the full 64 KB tile fits comfortably in L2. LLC misses are also gone, meaning DRAM access has been eliminated entirely.
 
-The LLC bottleneck is gone. The diagnosis has shifted: **Retiring now dominates**, which means the pipeline is completing instructions efficiently. But is it completing the *right kind* of instructions?
+The LLC bottleneck is gone. That means the original memory problem has largely been removed. The diagnosis has now shifted: **Retiring** dominates, so the next question is what kind of instructions make up that useful work.
 
-### New diagnosis: check the instruction mix
+### New diagnosis: inspect the Retiring breakdown
 
-With the memory bottleneck removed, drill into the **Retiring** category. Open the **Speculative Operation Mix** panel:
+With the memory bottleneck removed, look at the **Retiring** breakdown. In ATP, the **Speculative Operation Mix** panel shows what kinds of instructions are contributing to Retiring:
 
 <img src="assets/tiled_retiring.png" width="400" alt="Operation mix for tiled matmul"/>
 
-The operation mix reveals the next problem. Loads account for 28.3% of operations, stores 14.0%, integer operations 29.1%, floating-point scalar operations 14.0%, and **Advanced SIMD 0%**. Every multiply-add is a scalar operation processing one float at a time. Arm NEON can process 4 floats per instruction, so the code is leaving roughly 4x throughput on the table.
+The operation mix reveals the next problem. Loads account for 28.3% of operations, stores 14.0%, integer operations 29.1%, floating-point scalar operations 14.0%, and **Advanced SIMD 0%**. In other words, Retiring is high, but the arithmetic is still entirely scalar. Every multiply-add is processing one `float` at a time. Arm NEON can process 4 floats per instruction, so the code is leaving roughly 4x throughput on the table.
 
 **New diagnosis: Retiring is high but scalar-only. The bottleneck is now compute throughput, not memory.**
 
@@ -199,9 +218,9 @@ The operation mix reveals the next problem. Loads account for 28.3% of operation
 
 ## 4. Fix and Re-Profile: NEON Register Blocking
 
-The diagnosis says to vectorise the arithmetic. The NEON kernel in `src/matmul_neon.cpp` introduces two changes. First, a **4x4 register blocking** micro-kernel holds a 4x4 sub-block of C in NEON registers and uses `vfmaq_n_f32` to perform 4 multiply-adds per instruction. Second, **B-tile packing** rearranges each B tile into contiguous memory so the micro-kernel reads B sequentially (all L1 hits) instead of striding by N.
+The next optimisation is therefore to vectorise the arithmetic. The NEON kernel in `src/matmul_neon.cpp` makes two important changes. First, it processes `C` in `4x4` blocks held in NEON registers, so each `vfmaq_n_f32` updates four output values at once. Second, it packs each `B` tile into a contiguous buffer so the inner loop can read `B` sequentially instead of with a large stride.
 
-The tile size is also reduced to TILE=64. Three 64x64 tiles total 48 KB, which fits in L1d (64 KB) rather than just L2. The NEON micro-kernel can afford a smaller tile because it holds more data in registers:
+The tile size is also reduced to `TILE=64`. Three `64x64` tiles total 48 KB, which fits in L1d (64 KB). The code below shows both ideas: `pack_B_tile(...)` creates the contiguous `B` buffer, and the inner loops update a `4x4` block of `C` using NEON registers:
 
 ```cpp
 constexpr int TILE = 64;
@@ -258,7 +277,7 @@ void matmul_neon(const float* A, const float* B, float* C, int M, int K, int N) 
 
 ### Re-profile: is SIMD being used?
 
-Run the Topdown recipe on `matmul_neon`. Go straight to the Speculative Operation Mix, as that is what we need to verify:
+Run the Topdown recipe on `matmul_neon`. Since the goal of this change was to introduce SIMD arithmetic, go straight to the **Speculative Operation Mix** to verify that the instruction mix has changed:
 
 <img src="assets/neon_retiring.png" width="400" alt="Operation mix for NEON matmul"/>
 
@@ -278,15 +297,15 @@ Run all three back-to-back and compare your ATP profiles:
 
 Across the three optimisation steps, the ATP Topdown view tells a consistent story of progress. For the naive kernel, Backend Bound dominates at around 70%, LLC misses are at 61%, and SIMD utilisation is 0%. After tiling, Retiring dominates at 66% and both LLC misses and Backend Bound drop to near zero, but SIMD remains at 0%. After adding NEON register blocking, SIMD utilisation reaches ~32% and Backend Bound stays minimal.
 
-The diagnostic workflow follows the same pattern at each step. For the naive kernel, ATP pointed to Backend Bound, which drilled down to Memory Bound and then LLC misses caused by strided B access. The fix was 2D tiling to keep tiles in L2. For the tiled kernel, ATP showed Retiring was dominant but SIMD was 0%, pointing to scalar arithmetic as the bottleneck. The fix was a NEON 4x4 micro-kernel. After the NEON version, SIMD utilisation is at 31.6% and Backend Bound is minimal, indicating the workload is now compute-efficient.
+The diagnostic workflow follows the same pattern at each step. For the naive kernel, ATP pointed to Backend Bound, which narrowed to Memory Bound and then LLC misses caused by strided B access. The fix was 2D tiling to keep tiles in L2. For the tiled kernel, ATP showed Retiring was dominant but SIMD was 0%, pointing to scalar arithmetic as the bottleneck. The fix was a NEON 4x4 micro-kernel. After the NEON version, SIMD utilisation is at 31.6% and Backend Bound is minimal, indicating the workload is now compute-efficient.
 
-The key is that **ATP told us what to fix at each step**. The Topdown Summary pointed to the bottleneck category, and drilling into cache effectiveness or the operation mix told us exactly what to change.
+The key is that **ATP told us what to fix at each step**. The Topdown Summary pointed to the bottleneck category, and narrowing the diagnosis with cache effectiveness or the operation mix told us exactly what to change.
 
 ---
 
 ## Key Takeaways
 
-**Follow the Top-Down workflow.** The pattern is: Summary view -> dominant bucket -> drill down -> connect to code -> fix -> re-profile. This is the loop you will use in every tutorial in this course.
+**Follow the Top-Down workflow.** The pattern is: Summary view -> dominant bucket -> narrow the diagnosis -> connect to code -> fix -> re-profile. This is the loop you will use in every tutorial in this course.
 
 **Backend Bound combined with a high LLC miss ratio** means your working set does not fit in cache. The fix is to tile your loops or restructure your data access so that the inner computation operates on smaller blocks.
 
