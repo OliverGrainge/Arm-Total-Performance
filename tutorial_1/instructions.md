@@ -161,6 +161,10 @@ The key point is simple: the naive kernel wastes a huge amount of time missing i
 
 Now you know *what* the bottleneck is: poor cache locality caused by the `B[k*N + j]` access pattern. In this tutorial's default problem size, `N = 8192`, so each increment of `k` jumps ahead by 8192 `float` elements in memory instead of reading `B` contiguously.
 
+The animation below makes this concrete on a small matrix. Watch the memory strip under B: each consecutive access lands N positions further along, leaving a gap the cache has no opportunity to prefetch. Contrast this with A (teal), whose addresses step forward by one element at a time.
+
+<img src="assets/naive_memory_access.gif" width="850" alt="Naive matmul memory access pattern: B strides by N on every k-step"/>
+
 This is why the **L1D miss ratio is so high**. The inner loop touches data that is far apart in memory, so it gets very little reuse at the top of the hierarchy. Many of those misses are recovered in L2 or LLC, but some still continue to DRAM.
 
 The full `B` matrix is 256 MB, far exceeding the ~32 MB LLC, so the cache hierarchy cannot retain the needed data effectively as the loop walks through `B`.
@@ -198,6 +202,10 @@ void matmul_tiled(const float* A, const float* B, float* C, int M, int K, int N)
       }
 }
 ```
+
+The animation below shows how tiling changes the access pattern. The dashed box marks the active tile in each matrix. Within a tile the innermost loop sweeps `j`, so B moves one element at a time across a short row, and the B memory strip shows a compact, contiguous block of addresses rather than the scattered jumps seen in the naive version.
+
+<img src="assets/tiled_memory_access.gif" width="850" alt="Tiled matmul memory access pattern: B accesses are sequential within each tile"/>
 
 ### Re-profile: did it work?
 
