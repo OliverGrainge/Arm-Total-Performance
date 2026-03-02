@@ -1,0 +1,3 @@
+[submodule "tutorial_3/src/kleidiai"]
+	path = tutorial_3/src/kleidiai
+	url = https://github.com/ARM-software/kleidiai.git

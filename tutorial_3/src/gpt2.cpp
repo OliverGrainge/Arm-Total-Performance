@@ -56,9 +56,10 @@
      std::vector<float> mlp_pj_w, mlp_pj_b;             // (n_layer, E, 4E)
      std::vector<float> ln_f_w, ln_f_b;
  };
+
  
  // ── run-time state ────────────────────────────────────────────────────────────
- 
+
  struct State {
      std::vector<float> x, xb, qkv, attn_out, mlp_h, logits;
      std::vector<float> key_cache, val_cache;   // (n_layer, n_ctx, n_embd)
@@ -66,7 +67,7 @@
  
      void init(const Config &c) {
          int E = c.n_embd;
-         x.assign(E, 0); xb.assign(E, 0);
+         x.assign(E, 0); xb.assign(E, 0); 
          qkv.assign(3*E, 0); attn_out.assign(E, 0);
          mlp_h.assign(4*E, 0); logits.assign(c.vocab_size, 0);
          key_cache.assign((size_t)c.n_layer * c.n_ctx * E, 0);
@@ -130,30 +131,33 @@
          std::fill(s.attn_out.begin(), s.attn_out.end(), 0.f);
          float scale = 1.f / sqrtf((float)hs);
  
- #pragma omp parallel for schedule(static)
+         #pragma omp parallel for schedule(static)
          for (int h = 0; h < H; h++) {
-             const float *q  = Q + h*hs;
-             float *sc       = s.att_score.data() + h*cfg.n_ctx;
-             const float *kc = s.key_cache.data() + loff;
- 
+             // Pointers for this head's slice of Q, and its output slot in att_score
+             const float *q  = Q + h*hs;                           // this head's query vector (hs elements)
+             float *sc       = s.att_score.data() + h*cfg.n_ctx;   // this head's attention scores [0..pos]
+             const float *kc = s.key_cache.data() + loff;          // this layer's cached keys (all positions)
+         
+             // ── Step 1: Compute attention scores (Q·K^T / sqrt(hs)) ──
              for (int t = 0; t <= pos; t++) {
                  float dot = 0;
-                 const float *k_t = kc + (size_t)t*E + h*hs;
+                 const float *k_t = kc + (size_t)t*E + h*hs;   // key at position t, this head's slice
                  for (int i = 0; i < hs; i++) dot += q[i]*k_t[i];
-                 sc[t] = dot * scale;
+                 sc[t] = dot * scale;                          // scaled dot product → raw attention score
              }
-             // softmax
+         
+             // ── Step 2: Softmax over all positions ──
              float mx = *std::max_element(sc, sc+pos+1), sm = 0;
-             for (int t = 0; t<=pos; t++) { sc[t]=expf(sc[t]-mx); sm+=sc[t]; }
-             for (int t = 0; t<=pos; t++) sc[t] /= sm;
- 
-             // weighted sum of values
-             float *oh      = s.attn_out.data() + h*hs;
-             const float *vc = s.val_cache.data() + loff;
+             for (int t = 0; t<=pos; t++) { sc[t]=expf(sc[t]-mx); sm+=sc[t]; }  // subtract max for stability
+             for (int t = 0; t<=pos; t++) sc[t] /= sm;                           // normalize to sum to 1
+         
+             // ── Step 3: Weighted sum of values → attention output for this head ──
+             float *oh      = s.attn_out.data() + h*hs;       // this head's slice of the output
+             const float *vc = s.val_cache.data() + loff;     // this layer's cached values (all positions)
              for (int t = 0; t <= pos; t++) {
-                 const float *v_t = vc + (size_t)t*E + h*hs;
-                 float a = sc[t];
-                 for (int i = 0; i < hs; i++) oh[i] += a*v_t[i];
+                 const float *v_t = vc + (size_t)t*E + h*hs;  // value at position t, this head's slice
+                 float a = sc[t];                              // softmax weight for position t
+                 for (int i = 0; i < hs; i++) oh[i] += a*v_t[i];  // accumulate: output += a * V_t
              }
          }
  

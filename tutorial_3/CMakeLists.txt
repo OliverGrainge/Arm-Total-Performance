@@ -20,3 +20,18 @@ else()
     message(STATUS "OpenMP not found; building gpt2 without -fopenmp")
 endif()
 
+# ── gpt2_kleidiai: same as gpt2 but uses KleidiAI microkernels ───────────────
+set(KLEIDIAI_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(KLEIDIAI_BUILD_BENCHMARK OFF CACHE BOOL "" FORCE)
+add_subdirectory(src/kleidiai EXCLUDE_FROM_ALL)
+
+add_executable(gpt2_kleidiai src/gpt2_kleidiai.cpp)
+target_include_directories(gpt2_kleidiai PRIVATE src/kleidiai)
+target_link_libraries(gpt2_kleidiai PRIVATE kleidiai)
+if(OpenMP_CXX_FOUND)
+    message(STATUS "Building gpt2_kleidiai with OpenMP support")
+    target_link_libraries(gpt2_kleidiai PRIVATE OpenMP::OpenMP_CXX)
+else()
+    message(STATUS "OpenMP not found; building gpt2_kleidiai without -fopenmp")
+endif()
+
