@@ -1,20 +1,16 @@
 """
-Generate an animated GIF comparing memory access patterns for:
-  Array-of-Structures (AoS) — the inefficient baseline
-  Structure-of-Arrays (SoA) — the optimised layout
+Generate an animated GIF comparing AoS vs SoA memory access patterns.
 
-Demonstrates the cache waste in the particle position-update loop:
-  p[i].x += p[i].vx * dt;
-  p[i].y += p[i].vy * dt;
-  p[i].z += p[i].vz * dt;
+Visual convention: left-to-right = contiguous addresses.
 
-Visual layout (side-by-side, N=16 particles, 16 animation steps):
-  Left  — AoS: fields on Y-axis (16 rows), particles on X-axis (16 cols)
-          Each column = one particle = one 64-byte cache line
-          Top 6 rows (x,y,z,vx,vy,vz) are HOT; bottom 10 are COLD/wasted
-  Right — SoA: arrays on Y-axis (6 rows), particles on X-axis (16 cols)
-          Each row = one field array = one 64-byte cache line (for N=16)
-          Every cell is HOT; 100% cache-line utilisation
+  AoS panel (top): rows = particles, cols = struct fields
+    Reading across one row shows the contiguous 64-byte struct in memory.
+    First 6 fields (x,y,z,vx,vy,vz) are hot; last 10 are cold/wasted.
+    At step i the whole row for particle i is fetched — but only 6 cells used.
+
+  SoA panel (bottom): rows = field arrays, cols = particle indices
+    Reading across one row shows the contiguous array for that field.
+    At step i, one cell per row is accessed; all loaded cells are used.
 
 Output: ../assets/aos_vs_soa_memory.gif
 """
@@ -30,34 +26,30 @@ import io
 ASSETS = os.path.join(os.path.dirname(__file__), "..", "assets")
 os.makedirs(ASSETS, exist_ok=True)
 
-# ── Colour palette (matching tutorial_1) ──────────────────────────────────────
+# ── Colour palette ─────────────────────────────────────────────────────────────
 C_BG         = "#1e2127"
 C_CELL_DARK  = "#2b3038"
 C_CELL_EDGE  = "#3e4450"
-C_HOT        = "#56b6c2"    # teal   — hot field (used)
-C_HOT_ACTIVE = "#98c379"    # green  — hot field, currently being accessed
-C_COLD_DIM   = "#3a2020"    # very dark red — cold field, not yet visited
-C_COLD_HI    = "#e06c75"    # bright red  — cold field loaded but wasted
-C_TRAIL_HOT  = "#1d474d"    # dim teal    — hot field, previously accessed
-C_TRAIL_COLD = "#2d1515"    # dim red     — cold field, previously wasted
-C_CACHELINE  = "#e5c07b"    # yellow      — cache-line boundary
-C_MISS       = "#e06c75"    # red    — cache miss label
-C_HIT        = "#98c379"    # green  — cache hit label
+C_HOT        = "#56b6c2"   # teal  — hot field, not yet visited
+C_HOT_ACTIVE = "#98c379"   # green — hot field, currently accessed
+C_COLD_DIM   = "#3a2020"   # very dark red — cold field, not yet visited
+C_COLD_HI    = "#e06c75"   # red   — cold field loaded but wasted
+C_TRAIL_HOT  = "#1d474d"   # dim teal — hot, previously accessed
+C_TRAIL_COLD = "#2d1515"   # dim red  — cold, previously wasted
+C_CACHELINE  = "#e5c07b"   # yellow — cache-line boundary
 C_TEXT       = "#abb2bf"
 C_LABEL      = "#e5c07b"
 
-# ── Problem constants ──────────────────────────────────────────────────────────
-N             = 16    # particles  (= CACHE_LINE_FLOATS for clean alignment)
-HOT_FIELDS    = 6     # x, y, z, vx, vy, vz
-COLD_FIELDS   = 10    # mass, chg, tmp, prs, eng, dns, sx, sy, sz, pad
-TOTAL_FIELDS  = 16    # HOT + COLD  →  one cache line at 4 B/float
-FLOAT_B       = 4     # bytes per float
-CACHE_LINE_B  = 64    # bytes per cache line
+# ── Constants ──────────────────────────────────────────────────────────────────
+N            = 16   # particles  (= 1 cache line of floats → clean SoA alignment)
+HOT_FIELDS   = 6    # x y z vx vy vz
+COLD_FIELDS  = 10   # mass chg tmp prs eng dns sx sy sz pad
+TOTAL_FIELDS = 16   # HOT + COLD = one cache line (16 × 4 B = 64 B)
 
 FIELD_NAMES = ["x", "y", "z", "vx", "vy", "vz",
                "mass", "chg", "tmp", "prs",
                "eng", "dns", "sx", "sy", "sz", "pad"]
-HOT_NAMES = FIELD_NAMES[:HOT_FIELDS]
+HOT_NAMES   = FIELD_NAMES[:HOT_FIELDS]
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -79,257 +71,192 @@ def save_gif(frames, path, fps=5):
     print(f"  {len(frames)} frames  →  {path}")
 
 
-# ── Panel drawing ──────────────────────────────────────────────────────────────
+# ── AoS panel ─────────────────────────────────────────────────────────────────
 
-def draw_aos_panel(ax, step):
+def draw_aos(ax, step):
     """
-    AoS grid: rows = TOTAL_FIELDS (Y-axis), cols = N particles (X-axis).
-    Column i = all fields of particle i = one 64-byte cache line.
-    Top HOT_FIELDS rows are used; bottom COLD_FIELDS rows are wasted.
-    """
-    rows = TOTAL_FIELDS
-    cols = N
+    rows = N particles  (Y-axis: p[0] at top, p[N-1] at bottom)
+    cols = TOTAL_FIELDS  (X-axis: left = hot fields, right = cold/wasted)
 
-    # Extra padding for labels and annotations
-    ax.set_xlim(-0.5, cols + 3.5)
-    ax.set_ylim(-4.0, rows + 3.5)
+    Reading left→right across any row is contiguous memory for that struct.
+    Each row is exactly one 64-byte cache line.
+    """
+    rows, cols = N, TOTAL_FIELDS
+
+    ax.set_xlim(-1.8, cols + 0.3)
+    ax.set_ylim(-1.8, rows + 2.5)
     ax.set_aspect("equal")
     ax.axis("off")
 
-    ax.set_title("Array-of-Structures  (AoS — Baseline)",
-                 color=C_LABEL, fontsize=10, fontweight="bold", pad=6)
+    ax.set_title("Array-of-Structures  (AoS)",
+                 color=C_LABEL, fontsize=11, fontweight="bold", pad=4)
 
-    # ── hot / cold divider line ───────────────────────────────────────────────
-    divider_y = rows - HOT_FIELDS
-    ax.plot([-0.1, cols + 0.1], [divider_y, divider_y],
-            color=C_CACHELINE, lw=1.5, linestyle="--", zorder=6)
-
-    ax.text(cols + 0.4, divider_y + 0.3,
-            "↑ HOT\n  (used)", color=C_HOT, fontsize=7,
-            ha="left", va="bottom", linespacing=1.3)
-    ax.text(cols + 0.4, divider_y - 0.3,
-            "↓ COLD\n  (wasted)", color=C_COLD_HI, fontsize=7,
-            ha="left", va="top", linespacing=1.3)
-
-    # ── draw cells ────────────────────────────────────────────────────────────
-    for f in range(rows):
-        is_hot = (f < HOT_FIELDS)
-        for p in range(cols):
+    # ── cells ─────────────────────────────────────────────────────────────────
+    for p in range(rows):
+        for f in range(cols):
+            is_hot = f < HOT_FIELDS
             if p < step:
-                fc = C_TRAIL_HOT if is_hot else C_TRAIL_COLD
-                ec = C_CELL_EDGE
-                lw = 0.5
-                zo = 2
+                fc = C_TRAIL_HOT  if is_hot else C_TRAIL_COLD
+                ec, lw = C_CELL_EDGE, 0.4
             elif p == step:
                 fc = C_HOT_ACTIVE if is_hot else C_COLD_HI
-                ec = "white"
-                lw = 1.5
-                zo = 4
+                ec, lw = "white", 1.5
             else:
-                fc = C_CELL_DARK if is_hot else C_COLD_DIM
-                ec = C_CELL_EDGE
-                lw = 0.5
-                zo = 2
+                fc = C_CELL_DARK  if is_hot else C_COLD_DIM
+                ec, lw = C_CELL_EDGE, 0.4
 
-            y_pos = rows - 1 - f
-            ax.add_patch(plt.Rectangle((p, y_pos), 1, 1,
-                                       fc=fc, ec=ec, lw=lw, zorder=zo))
+            ax.add_patch(plt.Rectangle((f, rows - 1 - p), 1, 1,
+                                       fc=fc, ec=ec, lw=lw, zorder=3 if p == step else 2))
 
-        # Row label (field name)
-        is_hot_label_color = C_HOT if is_hot else C_COLD_HI
-        ax.text(-0.3, rows - 0.5 - f, FIELD_NAMES[f],
-                color=is_hot_label_color, fontsize=6.5,
-                ha="right", va="center", fontweight="bold")
+    # ── row labels (particle index) ────────────────────────────────────────────
+    for p in range(rows):
+        ax.text(-0.2, rows - 0.5 - p,
+                f"p[{p}]",
+                color=C_LABEL if p == step else C_TEXT,
+                fontsize=6.5, ha="right", va="center",
+                fontweight="bold" if p == step else "normal")
 
-    # ── column header for current particle ───────────────────────────────────
-    ax.text(step + 0.5, rows + 0.6, f"p[{step}]",
-            color=C_LABEL, fontsize=7, ha="center", va="center",
-            fontweight="bold")
+    # ── column labels (field names, top) ──────────────────────────────────────
+    for f in range(cols):
+        c = C_HOT if f < HOT_FIELDS else C_COLD_HI
+        ax.text(f + 0.5, rows + 0.6, FIELD_NAMES[f],
+                color=c, fontsize=6, ha="center", va="bottom",
+                fontweight="bold", rotation=45)
 
-    # ── cache-line highlight (full column = 64 B) ────────────────────────────
+    # ── hot / cold bracket labels ──────────────────────────────────────────────
+    ax.text(HOT_FIELDS / 2,       rows + 2.1, "hot  (24 B used)",
+            color=C_HOT,    fontsize=7, ha="center", va="center")
+    ax.text((HOT_FIELDS + cols) / 2, rows + 2.1, "cold  (40 B wasted)",
+            color=C_COLD_HI, fontsize=7, ha="center", va="center")
+
+    # bracket lines under the labels
+    for x0, x1, color in [
+        (0,          HOT_FIELDS,   C_HOT),
+        (HOT_FIELDS, TOTAL_FIELDS, C_COLD_HI),
+    ]:
+        ax.plot([x0, x1], [rows + 1.8, rows + 1.8], color=color, lw=1.2)
+        ax.plot([x0, x0], [rows + 1.8, rows + 1.6], color=color, lw=1.2)
+        ax.plot([x1, x1], [rows + 1.8, rows + 1.6], color=color, lw=1.2)
+
+    # ── vertical divider between hot and cold ─────────────────────────────────
+    ax.plot([HOT_FIELDS, HOT_FIELDS], [-0.05, rows + 0.05],
+            color=C_CACHELINE, lw=1.2, linestyle=":", zorder=5)
+
+    # ── cache-line box around current row ─────────────────────────────────────
+    y = rows - 1 - step
     ax.add_patch(plt.Rectangle(
-        (step - 0.12, -0.12), 1.24, rows + 0.24,
-        fc="none", ec=C_CACHELINE, lw=2.2, zorder=5
+        (-0.08, y - 0.08), cols + 0.16, 1.16,
+        fc="none", ec=C_CACHELINE, lw=2.0, zorder=6
     ))
-
-    # ── "MISS" annotation below column ───────────────────────────────────────
-    ax.text(step + 0.5, -0.7, "MISS",
-            color=C_MISS, fontsize=7, ha="center", va="center",
-            fontweight="bold")
-
-    # ── running cache-miss counter ────────────────────────────────────────────
-    misses = step + 1
-    ax.text(cols / 2, -2.0,
-            f"Cache misses so far: {misses} / {N}  (1 miss per particle — every step!)",
-            color=C_MISS, fontsize=8, ha="center", va="center",
-            fontweight="bold")
-
-    # ── cache-line utilisation stat ───────────────────────────────────────────
-    used_B   = HOT_FIELDS * FLOAT_B
-    loaded_B = TOTAL_FIELDS * FLOAT_B
-    wasted_B = loaded_B - used_B
-    pct      = 100 * used_B // loaded_B
-    ax.text(cols / 2, -3.2,
-            f"Each cache line: {loaded_B} B loaded  |  {used_B} B useful  |"
-            f"  {wasted_B} B wasted  →  {pct}% utilisation",
-            color=C_TEXT, fontsize=8, ha="center", va="center",
-            bbox=dict(boxstyle="round,pad=0.35", fc=C_CELL_DARK,
-                      ec=C_COLD_HI, lw=1.2))
+    ax.text(cols + 0.2, y + 0.5, "64 B\ncache\nline",
+            color=C_CACHELINE, fontsize=6.5, ha="left", va="center",
+            linespacing=1.3)
 
 
-def draw_soa_panel(ax, step):
+# ── SoA panel ─────────────────────────────────────────────────────────────────
+
+def draw_soa(ax, step):
     """
-    SoA grid: rows = HOT_FIELDS (Y-axis), cols = N particles (X-axis).
-    Row f = contiguous array for field f.
+    rows = HOT_FIELDS  (Y-axis: one row per field array)
+    cols = N particles  (X-axis: consecutive particle indices)
+
+    Reading left→right across any row is contiguous memory for that array.
     For N=16 each row is exactly one 64-byte cache line.
-    First access (step 0) = 6 cache misses (one per array); steps 1-15 = hits.
+    The first access loads the whole row; subsequent accesses are L1C hits.
     """
-    rows = HOT_FIELDS
-    cols = N
+    rows, cols = HOT_FIELDS, N
 
-    ax.set_xlim(-0.5, cols + 3.5)
-    ax.set_ylim(-4.0, rows + 3.5)
+    ax.set_xlim(-1.8, cols + 1.5)
+    # Extend bottom so this panel is the same physical height as the AoS panel
+    # (AoS ylim range ≈ 20.3; match that here so cells stay the same size).
+    ax.set_ylim(-12.5, rows + 2.5)
     ax.set_aspect("equal")
     ax.axis("off")
 
-    ax.set_title("Structure-of-Arrays  (SoA — Optimised)",
-                 color=C_LABEL, fontsize=10, fontweight="bold", pad=6)
+    ax.set_title("Structure-of-Arrays  (SoA)",
+                 color=C_LABEL, fontsize=11, fontweight="bold", pad=4)
 
-    # ── draw cells ────────────────────────────────────────────────────────────
+    # ── cells ─────────────────────────────────────────────────────────────────
     for f in range(rows):
         for p in range(cols):
             if p < step:
                 fc = C_TRAIL_HOT
-                ec = C_CELL_EDGE
-                lw = 0.5
-                zo = 2
+                ec, lw = C_CELL_EDGE, 0.4
             elif p == step:
                 fc = C_HOT_ACTIVE
-                ec = "white"
-                lw = 1.5
-                zo = 4
+                ec, lw = "white", 1.5
             else:
                 fc = C_CELL_DARK
-                ec = C_CELL_EDGE
-                lw = 0.5
-                zo = 2
+                ec, lw = C_CELL_EDGE, 0.4
 
             ax.add_patch(plt.Rectangle((p, rows - 1 - f), 1, 1,
-                                       fc=fc, ec=ec, lw=lw, zorder=zo))
+                                       fc=fc, ec=ec, lw=lw, zorder=3 if p == step else 2))
 
-        # Row label
-        ax.text(-0.3, rows - 0.5 - f, HOT_NAMES[f],
-                color=C_HOT, fontsize=7.5, ha="right", va="center",
+    # ── row labels (array name) ────────────────────────────────────────────────
+    for f in range(rows):
+        ax.text(-0.2, rows - 0.5 - f, HOT_NAMES[f],
+                color=C_HOT, fontsize=8, ha="right", va="center",
                 fontweight="bold")
 
-    # ── cache-line boxes around each row ─────────────────────────────────────
-    # For N=16 the entire row IS one cache line.
-    # On step 0 they are being loaded (bright dashed); afterwards already resident.
-    edge_color = C_CACHELINE if step == 0 else C_TRAIL_HOT
-    edge_lw    = 2.0         if step == 0 else 1.0
-    alpha      = 0.9         if step == 0 else 0.4
+    # ── cache-line boxes (one per row = entire array in one 64-byte load) ─────
     for f in range(rows):
+        y = rows - 1 - f
+        # bright on first access (step 0), dim afterwards (data already resident)
+        ec  = C_CACHELINE if step == 0 else C_TRAIL_HOT
+        lw  = 1.8         if step == 0 else 0.8
+        alp = 0.9         if step == 0 else 0.35
         ax.add_patch(plt.Rectangle(
-            (-0.10, rows - 1 - f - 0.10), cols + 0.20, 1.20,
-            fc="none", ec=edge_color, lw=edge_lw,
-            linestyle="--", zorder=3, alpha=alpha
+            (-0.08, y - 0.08), cols + 0.16, 1.16,
+            fc="none", ec=ec, lw=lw, linestyle="--", zorder=5, alpha=alp
         ))
 
-    # ── column header for current particle ───────────────────────────────────
-    ax.text(step + 0.5, rows + 0.6, f"[{step}]",
-            color=C_LABEL, fontsize=7, ha="center", va="center",
-            fontweight="bold")
+    # ── "all used" label at top ────────────────────────────────────────────────
+    ax.text(cols / 2, rows + 1.0,
+            "every cache line: 64 B loaded — 64 B used",
+            color=C_HOT, fontsize=7, ha="center", va="center")
 
-    # ── cache hit/miss annotation ─────────────────────────────────────────────
-    if step == 0:
-        label    = f"MISS ×{HOT_FIELDS}  (one per array)"
-        lcolor   = C_MISS
-    else:
-        label    = f"L1C HIT ✓"
-        lcolor   = C_HIT
-
-    ax.text(step + 0.5, -0.7, label,
-            color=lcolor, fontsize=7, ha="center", va="center",
-            fontweight="bold")
-
-    # ── running cache-miss summary ────────────────────────────────────────────
-    # All 6 misses happen at step 0; afterwards none.
-    total_misses = HOT_FIELDS
-    hits_so_far  = step  # accesses after the first (step 0 is the miss)
-    ax.text(cols / 2, -2.0,
-            f"Cache misses: {total_misses} total  "
-            f"(6 arrays × 1 miss each, all at first access)",
-            color=C_HIT, fontsize=8, ha="center", va="center",
-            fontweight="bold")
-
-    # ── cache-line utilisation stat ────────────────────────────────────────────
-    ax.text(cols / 2, -3.2,
-            f"Each cache line: {CACHE_LINE_B} B loaded  |  {CACHE_LINE_B} B useful  |"
-            f"  0 B wasted  →  100% utilisation",
-            color=C_TEXT, fontsize=8, ha="center", va="center",
-            bbox=dict(boxstyle="round,pad=0.35", fc=C_CELL_DARK,
-                      ec=C_HOT, lw=1.2))
+    ax.plot([0, cols], [rows + 0.7, rows + 0.7], color=C_HOT, lw=1.2)
+    ax.plot([0,   0],  [rows + 0.7, rows + 0.5], color=C_HOT, lw=1.2)
+    ax.plot([cols, cols], [rows + 0.7, rows + 0.5], color=C_HOT, lw=1.2)
 
 
-# ── Main GIF builder ──────────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────────────────
 
-def make_comparison_gif():
-    print(f"AoS vs SoA: {N} particles = {N} frames")
+def make_gif():
+    print(f"AoS vs SoA: {N} particles → {N} frames")
     frames = []
 
     for step in range(N):
-        fig = plt.figure(figsize=(16, 7.5), facecolor=C_BG)
+        fig = plt.figure(figsize=(16, 8), facecolor=C_BG)
         fig.patch.set_facecolor(C_BG)
 
-        # GridSpec: AoS panel | spacer | SoA panel
-        # width_ratios reflect cell count: AoS=16 cols, SoA=16 cols, but AoS
-        # is taller so give it slightly more horizontal space for balance.
+        # Side-by-side landscape layout.
+        # Both panels have 16 data columns; equal width_ratios give matching
+        # cell sizes. SoA ylim is extended so both panels are the same height.
         gs = fig.add_gridspec(
-            1, 3,
-            width_ratios=[TOTAL_FIELDS, 1.0, TOTAL_FIELDS],
-            left=0.06, right=0.97, top=0.88, bottom=0.12,
-            wspace=0.15,
+            1, 2,
+            wspace=0.25,
+            left=0.08, right=0.97, top=0.88, bottom=0.05,
         )
         ax_aos = fig.add_subplot(gs[0, 0])
-        ax_soa = fig.add_subplot(gs[0, 2])
+        ax_soa = fig.add_subplot(gs[0, 1])
 
-        draw_aos_panel(ax_aos, step)
-        draw_soa_panel(ax_soa, step)
+        draw_aos(ax_aos, step)
+        draw_soa(ax_soa, step)
 
-        # ── suptitle ────────────────────────────────────────────────────────
-        loop_line = (
-            f"p[i].x += p[i].vx * dt;   "
-            f"p[i].y += p[i].vy * dt;   "
-            f"p[i].z += p[i].vz * dt"
-        )
         fig.suptitle(
-            f"Memory Layout: AoS vs SoA  ·  hot loop: {loop_line}\n"
-            f"step {step + 1}/{N}   processing particle  i = {step}",
-            color=C_TEXT, fontsize=10, y=0.97,
+            f"Memory layout — particle  i = {step}  (step {step + 1} / {N})\n"
+            f"p[i].x += p[i].vx * dt;   p[i].y += p[i].vy * dt;   p[i].z += p[i].vz * dt",
+            color=C_TEXT, fontsize=9, y=0.97,
         )
-
-        # ── legend ──────────────────────────────────────────────────────────
-        patches = [
-            mpatches.Patch(color=C_HOT_ACTIVE,
-                           label="Hot field (x, y, z, vx, vy, vz) — actively used"),
-            mpatches.Patch(color=C_COLD_HI,
-                           label="Cold field (mass, chg, …) — loaded but WASTED"),
-            mpatches.Patch(color=C_TRAIL_HOT,
-                           label="Hot field — previously accessed"),
-            mpatches.Patch(color=C_TRAIL_COLD,
-                           label="Cold field — previously wasted"),
-        ]
-        fig.legend(handles=patches, loc="lower center", ncol=4, fontsize=8,
-                   framealpha=0.35, facecolor=C_CELL_DARK, edgecolor=C_CELL_EDGE,
-                   labelcolor=C_TEXT, bbox_to_anchor=(0.5, 0.01))
 
         frames.append(fig_to_pil(fig))
         plt.close(fig)
 
-    save_gif(frames, os.path.join(ASSETS, "aos_vs_soa_memory.gif"), fps=5)
+    save_gif(frames, os.path.join(ASSETS, "aos_vs_soa_memory.gif"))
 
 
 if __name__ == "__main__":
     print("Generating aos_vs_soa_memory.gif …")
-    make_comparison_gif()
+    make_gif()
     print("Done.")

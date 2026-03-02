@@ -42,3 +42,8 @@ matmul_tiled
 # OS
 .DS_Store
 Thumbs.db
+
+# data 
+*.bin
+*.docx
+*.txt
