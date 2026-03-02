@@ -1,18 +1,21 @@
 # Tutorial 1: Top-Down Performance Analysis Methodology
 
-In this tutorial, you will learn how to apply a Top-Down performance analysis workflow with **Arm Total Performance (ATP)** on Graviton to find computational bottlenecks and improve the performance of your code. The example workload is this tutorial is dense matrix multiplication (`C = A x B`) in single-precision floating point, but the goal is to teach a method you can transfer to other workloads and use to optimise your own code.
+Performance problems are rarely obvious from source code alone. A loop can look perfectly reasonable yet run far slower than expected, and without measurement it is easy to optimise the wrong thing. This tutorial shows you how to use **Arm Total Performance (ATP)** on **AWS Graviton** to identify bottlenecks systematically and verify that each fix actually works.
 
-You will improve the workload step by step by repeating ATP's core optimisation loop: **profile, diagnose, fix, re-profile**. Across three iterations, you will use ATP to identify the main bottleneck, apply a targeted code change, and then verify how the performance profile shifts after each optimisation.
+The example workload is dense matrix multiplication (`C = A x B`) in single-precision floating point. It is deliberately simple: the code is short and the algorithm is well known, which makes it easy to focus on what ATP is telling you at each step. The goal is not just to optimise this workload, but to learn a diagnostic method you can apply to any code.
 
-Along the way, you will learn how to read several key parts of the ATP interface:
+You will work through three iterations of ATP's core optimisation loop: **profile, diagnose, fix, re-profile**. At each step, ATP identifies the dominant bottleneck, you apply a targeted fix, and ATP confirms whether the profile shifted as expected. By the end of this tutorial, you will know how to:
 
-1. Run the Topdown recipe and read the Summary view to identify the bottleneck category.
-2. Narrow the diagnosis using cache effectiveness in the Functions tab to find which cache level is responsible.
-3. Check the Speculative Operation Mix in the Retiring breakdown to assess SIMD utilisation.
+1. Read the ATP Topdown Summary view to identify the dominant bottleneck category.
+2. Use cache effectiveness metrics in the Functions tab to determine which cache level is responsible.
+3. Interpret the Speculative Operation Mix in the Retiring breakdown to assess SIMD utilisation.
 
-By the end, you should be comfortable using ATP's Topdown recipe to guide optimisation decisions and validate performance improvements on Graviton.
+## Before you begin
 
-**Prerequisites:** AWS Graviton 2/3 instance, C++ compiler (g++ 9+ or clang++ 14+), CMake 3.16+, ATP installed and configured.
+- An AWS Graviton 2/3 instance
+- C++ compiler (g++ 9+ or clang++ 14+)
+- CMake 3.16+
+- ATP installed and configured
 
 ## Workload Definition: MatMul Operator
 
@@ -72,7 +75,7 @@ With that background in place, the next step is to build and run the example on 
 
 ---
 
-## 1. Build the Code
+## Build the Code
 
 ```bash
 cd tutorial_1
@@ -85,7 +88,7 @@ This produces three executables: `matmul_naive`, `matmul_tiled`, and `matmul_neo
 
 ---
 
-## 2. Profile the Baseline: Learning the Topdown Summary View
+## Profile the Baseline: Learning the Topdown Summary View
 
 Run the naive implementation to get a baseline timing:
 
@@ -168,7 +171,7 @@ Now that the bottleneck is clear, the next step is to change the loop structure 
 
 ---
 
-## 3. Fix and Re-Profile: 2D Tiling
+## Fix and Re-Profile: 2D Tiling
 
 The solution to poor cache locality is to keep the working set in cache. For matrix multiplication, the standard way to do this is **2D tiling**: split the loops into smaller blocks so the inner computation reuses sub-blocks of `A`, `B`, and `C` while they are still resident in the cache hierarchy.
 
@@ -228,7 +231,7 @@ The operation mix reveals the next problem. Loads account for 28.3% of operation
 
 ---
 
-## 4. Fix and Re-Profile: NEON Register Blocking
+## Fix and Re-Profile: NEON Register Blocking
 
 The next optimisation is therefore to vectorise the arithmetic. The NEON kernel in `src/matmul_neon.cpp` makes two important changes. First, it processes `C` in `4x4` blocks held in NEON registers, so each `vfmaq_n_f32` updates four output values at once. Second, it packs each `B` tile into a contiguous buffer so the inner loop can read `B` sequentially instead of with a large stride.
 
@@ -297,7 +300,7 @@ The result confirms the optimisation worked. Scalar floating-point dropped from 
 
 ---
 
-## 5. The Full Picture
+## The Full Picture
 
 Run all three back-to-back and compare your ATP profiles:
 

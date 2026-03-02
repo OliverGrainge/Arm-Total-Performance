@@ -1,17 +1,20 @@
-# Tutorial 2: Optimizing a Memory-Bound Workload with ATP — Memory Access + CPU Cycle Hotspots
+# Tutorial 2: Optimising a Memory-Bound Workload with ATP — Memory Access + CPU Cycle Hotspots
 
-In this tutorial you will use **Arm Total Performance (ATP)** to optimize a memory-bound C++ workload on **AWS (Amazon Web Services) Graviton**. You will profile the baseline with ATP's **Memory Access** and **CPU Cycle Hotspots** recipes, use the evidence to identify a data layout bottleneck, apply a source-level fix, and re-profile to verify the improvement.
+Memory bottlenecks are common on modern CPUs and often hard to spot without the right tools. A loop with simple arithmetic, no branching, and no data dependencies can still run far below its theoretical peak, and the cause is frequently a data layout problem rather than anything in the algorithm itself.
 
-The workflow follows a standard performance engineering loop:
+In this tutorial, you will use **Arm Total Performance (ATP)** to investigate exactly this kind of problem on **AWS Graviton**. Starting from a particle physics position-update loop with a subtle data layout inefficiency, you will use ATP's **Memory Access** recipe to measure cache behaviour, **CPU Cycle Hotspots** to map the cost to specific source lines, and both together to confirm the fix once applied. By the end of this tutorial, you will know how to:
 
-1. Understand the workload
-2. Profile the baseline with ATP Memory Access
-3. Map the hotspot to source with ATP CPU Cycle Hotspots
-4. Interpret the evidence — what is the bottleneck?
-5. Apply a fix
-6. Re-profile and verify
+1. Use the Memory Access recipe to measure cache hit rates and average load latency.
+2. Use CPU Cycle Hotspots to map memory pressure to specific source lines.
+3. Diagnose a data layout bottleneck by connecting evidence from two recipes.
+4. Verify the fix by re-profiling and comparing before and after metrics.
 
-**Prerequisites:** AWS Graviton 2/3 instance, GCC 9+ or Clang 14+, CMake 3.16+, ATP installed and configured.
+## Before you begin
+
+- An AWS Graviton 2/3 instance
+- GCC 9+ or Clang 14+
+- CMake 3.16+
+- ATP installed and configured
 
 ## Terms used in this tutorial
 
@@ -24,7 +27,7 @@ The workflow follows a standard performance engineering loop:
 
 ---
 
-## 1. The workload
+## The workload
 
 The program simulates a particle physics position update. Each iteration advances every particle's position using its velocity:
 
@@ -65,7 +68,7 @@ The binary prints a checksum. Record it — you will use it later to verify that
 
 ---
 
-## 2. Profile the baseline with Memory Access
+## Profile the baseline with Memory Access
 
 With the workload running correctly, the first question is: **where is the time going?** Since this is a simple arithmetic loop over a large array, memory behaviour is the most likely factor. ATP's Memory Access recipe uses the Arm SPE hardware to sample loads and attribute them to cache tiers.
 
@@ -113,7 +116,7 @@ Save these for comparison later:
 
 ---
 
-## 3. Map the hotspot to source with CPU Cycle Hotspots
+## Map the hotspot to source with CPU Cycle Hotspots
 
 The Memory Access profile told us there is a memory problem, but not *which lines of code* are responsible. CPU Cycle Hotspots will map the cost to exact source locations.
 
@@ -152,7 +155,7 @@ Two things stand out:
 
 ---
 
-## 4. Diagnose the root cause
+## Diagnose the root cause
 
 Now we have two pieces of evidence to connect:
 
@@ -181,7 +184,7 @@ The diagnosis is clear: **the data layout is the bottleneck**. The struct packs 
 
 ---
 
-## 5. The fix — restructure from Array-of-Structures to Structure-of-Arrays
+## The fix — restructure from Array-of-Structures to Structure-of-Arrays
 
 The fix is to separate hot fields from cold fields so that each cache line contains only data the loop actually uses. The standard approach is a **Structure-of-Arrays (SoA)** layout: instead of one struct per particle with all fields interleaved, you use one array per field so that all particles' values for a given field are contiguous in memory.
 
@@ -230,7 +233,7 @@ Confirm the checksum matches the AoS baseline. The same computation on the same 
 
 ---
 
-## 6. Re-profile with Memory Access — verify the fix
+## Re-profile with Memory Access — verify the fix
 
 Run the Memory Access recipe again, this time with `soa_optimized` as the workload.
 
@@ -263,7 +266,7 @@ The memory hierarchy is now behaving as expected for a simple stride-1 loop.
 
 ---
 
-## 7. Re-map hotspot to source with CPU Cycle Hotspots — verify the fix
+## Re-map hotspot to source with CPU Cycle Hotspots — verify the fix
 
 Run **CPU Cycle Hotspots** with `soa_optimized`. Open **View Source Code** for `main` and navigate to lines 19–22:
 
@@ -284,7 +287,7 @@ Notice the second confirmation: **the distribution across lines is now even** (7
 
 ---
 
-## 8. Summary of results
+## Summary of results
 
 | Metric | `aos_baseline` | `soa_optimized` | Change |
 |---|---:|---:|---|
