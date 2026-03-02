@@ -4,22 +4,10 @@ project(tutorial_1_topdown LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# -O2 so the compiler generates realistic code but doesn't auto-vectorise
-# away the performance differences we want to demonstrate.
+# -O2 so all examples build with the same optimization level.
 # -g for debug symbols so ATP can map samples back to source lines.
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -g")
 
 add_executable(matmul_naive  src/matmul_naive.cpp)
 add_executable(matmul_tiled  src/matmul_tiled.cpp)
 add_executable(matmul_neon   src/matmul_neon.cpp)
-
-# Disable auto-vectorisation on the scalar targets so the progression
-# reflects memory and register optimisations only (no hidden SIMD).
-# The NEON target uses explicit intrinsics, so no flag needed.
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
-    target_compile_options(matmul_naive PRIVATE -fno-tree-vectorize)
-    target_compile_options(matmul_tiled PRIVATE -fno-tree-vectorize)
-elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    target_compile_options(matmul_naive PRIVATE -fno-vectorize -fno-slp-vectorize)
-    target_compile_options(matmul_tiled PRIVATE -fno-vectorize -fno-slp-vectorize)
-endif()
