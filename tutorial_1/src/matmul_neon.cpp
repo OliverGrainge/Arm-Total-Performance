@@ -17,9 +17,9 @@
 // B-tile packing:
 //   Before the micro-kernel runs, the B tile is copied into a contiguous
 //   micro-panel layout.  In the original code the innermost k-loop
-//   accessed B[k*N+j] with stride N (one cache-line miss every few
-//   iterations).  After packing, the k-loop reads B sequentially,
-//   turning almost every access into an L1d hit.
+//   accessed B[k*N+j] with stride N. After packing, the k-loop reads B
+//   sequentially, greatly improving spatial locality and reducing the
+//   amount of traffic that falls through to deeper cache levels.
 //
 // Each vfmaq_n_f32 performs 4 multiply-adds in a single instruction,
 // giving 4× the work-per-instruction of the scalar tiled version.

@@ -8,9 +8,9 @@
 // Naive ijk ordering — the inner loop accesses B[k*N+j] with stride N,
 // jumping across rows on every iteration. For N=8192 each stride is 32 KB,
 // far exceeding a cache line.  The full B matrix (256 MB) does not fit in
-// the last-level cache (32 MB on Graviton3), so almost every B access
-// results in an LLC miss and a trip to DRAM.  This makes the workload
-// heavily Backend Bound → Memory Bound in the Top-Down model.
+// the last-level cache (32 MB on Graviton3), so this access pattern causes
+// frequent misses throughout the cache hierarchy and enough DRAM traffic to
+// make the workload heavily Backend Bound → Memory Bound in the Top-Down model.
 //
 // M is kept small (512) to limit runtime while preserving the memory
 // access profile on B — every row of A still sweeps the entire B matrix.
