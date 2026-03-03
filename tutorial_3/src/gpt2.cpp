@@ -139,7 +139,6 @@
          std::fill(s.attn_out.begin(), s.attn_out.end(), 0.f);
          float scale = 1.f / sqrtf((float)hs);
  
-         #pragma omp parallel for schedule(static)
          for (int h = 0; h < H; h++) {
              // Pointers for this head's slice of Q, and its output slot in att_score
              const float *q  = Q + h*hs;                           // this head's query vector (hs elements)
