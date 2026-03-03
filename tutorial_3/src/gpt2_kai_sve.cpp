@@ -167,12 +167,6 @@ static void matmul(float* out, const float* x, const uint8_t* rhs_packed,
     // of writable space (State::logits is allocated with this padding).
     const size_t n_blocks = ((size_t)n_out + n_step - 1) / n_step;
 
-    // Only parallelise when the output dimension is large enough that the OMP
-    // fork-join cost is amortised over sufficient work.  Small layer matmuls
-    // (n_out = 768..3072) run single-threaded; the SVE kernel provides its own
-    // data-level parallelism via wide vector registers.  The logit projection
-    // (n_out = 50257, ~1571 blocks) is large enough to benefit from threading.
-    #pragma omp parallel for schedule(static) if(n_out >= 4096)
     for (size_t b = 0; b < n_blocks; b++) {
         const size_t n_start = b * n_step;
         const size_t rhs_offset = ukernel.get_rhs_packed_offset(n_start, k);

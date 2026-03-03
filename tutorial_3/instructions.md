@@ -54,8 +54,8 @@ cd build
 For GPT-2 medium:
 
 ```bash
-./gpt2 --model gpt2-medium "Once upon a time" -n 30
-./gpt2_kai_sve --model gpt2-medium "Once upon a time" -n 100
+./gpt2 --model gpt2-medium "Once upon a time" -n 200
+./gpt2_kai_sve --model gpt2-medium "Once upon a time" -n 200
 ```
 
 ### Options
