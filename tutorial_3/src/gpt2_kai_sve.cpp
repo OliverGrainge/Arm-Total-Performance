@@ -166,7 +166,9 @@ static void matmul(float* out, const float* x, const uint8_t* rhs_packed,
     // of writable space (State::logits is allocated with this padding).
     const size_t n_blocks = ((size_t)n_out + n_step - 1) / n_step;
 
-    #pragma omp parallel for schedule(static)
+    // No OMP here: the SVE kernel already provides SIMD parallelism across n_step
+    // output elements per block.  Spawning OMP threads for fine-grained GEMV blocks
+    // costs more in barrier synchronisation than it saves.
     for (size_t b = 0; b < n_blocks; b++) {
         const size_t n_start = b * n_step;
         const size_t rhs_offset = ukernel.get_rhs_packed_offset(n_start, k);

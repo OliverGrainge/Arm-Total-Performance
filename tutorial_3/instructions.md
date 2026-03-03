@@ -47,8 +47,8 @@ From the `build` directory:
 
 ```bash
 cd build
-./gpt2 "Once upon a time"
-./gpt2_kleidiai "Once upon a time"
+./build/gpt2 "Once upon a time"
+./build/gpt2_kleidiai "Once upon a time"
 ```
 
 For GPT-2 medium:

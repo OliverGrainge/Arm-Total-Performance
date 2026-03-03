@@ -99,7 +99,6 @@
  // W is (n_out x n_in) row-major
  static void matmul(float *out, const float *x, const float *W, const float *b,
                     int n_in, int n_out) {
- #pragma omp parallel for schedule(static)
      for (int i = 0; i < n_out; i++) {
          float acc = b ? b[i] : 0.f;
          const float *row = W + (size_t)i * n_in;
