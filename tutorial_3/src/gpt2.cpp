@@ -99,6 +99,11 @@
  // W is (n_out x n_in) row-major
  static void matmul(float *out, const float *x, const float *W, const float *b,
                     int n_in, int n_out) {
+     // Only parallelise when the output dimension is large enough that the OMP
+     // fork-join cost is amortised over sufficient work.  Small layer matmuls
+     // (n_out = 768..3072) run single-threaded; the logit projection
+     // (n_out = 50257) is large enough to benefit from threading.
+     #pragma omp parallel for schedule(static) if(n_out >= 4096)
      for (int i = 0; i < n_out; i++) {
          float acc = b ? b[i] : 0.f;
          const float *row = W + (size_t)i * n_in;
