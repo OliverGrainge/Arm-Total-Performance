@@ -80,6 +80,21 @@ struct PackedWeights {
     std::vector<uint8_t> wte_logits;            // vocab_size → E  (weight-tied logit projection)
 };
 
+// ── ukernel (declared here so State::init can query n_step) ──────────────────
+
+static const kai_matmul_clamp_f32_f32_f32p_ukernel ukernel = {
+    kai_get_m_step_matmul_clamp_f32_f32_f32p4vlx1b_6x4vl_sve_mla,
+    kai_get_n_step_matmul_clamp_f32_f32_f32p4vlx1b_6x4vl_sve_mla,
+    kai_get_nr_matmul_clamp_f32_f32_f32p4vlx1b_6x4vl_sve_mla,
+    kai_get_kr_matmul_clamp_f32_f32_f32p4vlx1b_6x4vl_sve_mla,
+    kai_get_sr_matmul_clamp_f32_f32_f32p4vlx1b_6x4vl_sve_mla,
+    kai_get_lhs_offset_matmul_clamp_f32_f32_f32p4vlx1b_6x4vl_sve_mla,
+    kai_get_rhs_packed_offset_matmul_clamp_f32_f32_f32p4vlx1b_6x4vl_sve_mla,
+    kai_get_dst_offset_matmul_clamp_f32_f32_f32p4vlx1b_6x4vl_sve_mla,
+    kai_get_dst_size_matmul_clamp_f32_f32_f32p4vlx1b_6x4vl_sve_mla,
+    kai_run_matmul_clamp_f32_f32_f32p4vlx1b_6x4vl_sve_mla,
+};
+
 // ── run-time state ────────────────────────────────────────────────────────────
 
 struct State {
@@ -115,20 +130,6 @@ static void layernorm(float *o, const float *x, const float *w, const float *b, 
     for (int i = 0; i < n; i++) o[i] = w[i] * ((x[i]-(float)mean)*inv) + b[i];
 }
 
-
-
-static const kai_matmul_clamp_f32_f32_f32p_ukernel ukernel = {
-    kai_get_m_step_matmul_clamp_f32_f32_f32p4vlx1b_6x4vl_sve_mla,
-    kai_get_n_step_matmul_clamp_f32_f32_f32p4vlx1b_6x4vl_sve_mla,
-    kai_get_nr_matmul_clamp_f32_f32_f32p4vlx1b_6x4vl_sve_mla,
-    kai_get_kr_matmul_clamp_f32_f32_f32p4vlx1b_6x4vl_sve_mla,
-    kai_get_sr_matmul_clamp_f32_f32_f32p4vlx1b_6x4vl_sve_mla,
-    kai_get_lhs_offset_matmul_clamp_f32_f32_f32p4vlx1b_6x4vl_sve_mla,
-    kai_get_rhs_packed_offset_matmul_clamp_f32_f32_f32p4vlx1b_6x4vl_sve_mla,
-    kai_get_dst_offset_matmul_clamp_f32_f32_f32p4vlx1b_6x4vl_sve_mla,
-    kai_get_dst_size_matmul_clamp_f32_f32_f32p4vlx1b_6x4vl_sve_mla,
-    kai_run_matmul_clamp_f32_f32_f32p4vlx1b_6x4vl_sve_mla,
-};
 
 
 static void pack_weight_rhs(uint8_t* packed, const float* W, const float* bias,
