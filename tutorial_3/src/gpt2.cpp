@@ -68,15 +68,17 @@
  // ── run-time state ────────────────────────────────────────────────────────────
 
  struct State {
-     std::vector<float> x, xb, qkv, attn_out, mlp_h, logits;
+     std::vector<float> x, xb, qkv, attn_out, mlp_h, logits, proj_buf;
      std::vector<float> key_cache, val_cache;   // (n_layer, n_ctx, n_embd)
      std::vector<float> att_score;              // (n_head, n_ctx)
- 
+
      void init(const Config &c) {
          int E = c.n_embd;
-         x.assign(E, 0); xb.assign(E, 0); 
+         x.assign(E, 0); xb.assign(E, 0);
          qkv.assign(3*E, 0); attn_out.assign(E, 0);
-         mlp_h.assign(4*E, 0); logits.assign(c.vocab_size, 0);
+         mlp_h.assign(4*E, 0);
+         proj_buf.assign(4*E, 0);   // reusable projection scratch buffer (max dim = 4E)
+         logits.assign(c.vocab_size, 0);
          key_cache.assign((size_t)c.n_layer * c.n_ctx * E, 0);
          val_cache.assign((size_t)c.n_layer * c.n_ctx * E, 0);
          att_score.assign((size_t)c.n_head  * c.n_ctx,    0);
@@ -169,11 +171,10 @@
          }
  
          // Output projection + residual
-         { std::vector<float> p(E);
-           matmul(p.data(), s.attn_out.data(),
-                  w.c_proj_w.data()+(size_t)l*E*E,
-                  w.c_proj_b.data()+(size_t)l*E, E, E);
-           for (int i=0;i<E;i++) s.x[i]+=p[i]; }
+         matmul(s.proj_buf.data(), s.attn_out.data(),
+                w.c_proj_w.data()+(size_t)l*E*E,
+                w.c_proj_b.data()+(size_t)l*E, E, E);
+         for (int i=0;i<E;i++) s.x[i]+=s.proj_buf[i];
  
          // ── FFN ───────────────────────────────────────────────────────────
          layernorm(s.xb.data(), s.x.data(),
@@ -184,25 +185,17 @@
                 w.mlp_fc_b.data()+(size_t)l*4*E, E, 4*E);
          for (int i=0;i<4*E;i++) s.mlp_h[i]=gelu(s.mlp_h[i]);
  
-         { std::vector<float> p(E);
-           matmul(p.data(), s.mlp_h.data(),
-                  w.mlp_pj_w.data()+(size_t)l*E*4*E,
-                  w.mlp_pj_b.data()+(size_t)l*E, 4*E, E);
-           for (int i=0;i<E;i++) s.x[i]+=p[i]; }
+         matmul(s.proj_buf.data(), s.mlp_h.data(),
+                w.mlp_pj_w.data()+(size_t)l*E*4*E,
+                w.mlp_pj_b.data()+(size_t)l*E, 4*E, E);
+         for (int i=0;i<E;i++) s.x[i]+=s.proj_buf[i];
      }
  
      // 3. Final layer norm
      layernorm(s.x.data(), s.x.data(), w.ln_f_w.data(), w.ln_f_b.data(), E);
  
      // 4. Logits via weight tying  (vocab_size x n_embd) @ x
-     int V = cfg.vocab_size;
- #pragma omp parallel for schedule(static)
-     for (int v=0;v<V;v++) {
-         const float *row = w.wte.data()+(size_t)v*E;
-         float acc=0;
-         for (int i=0;i<E;i++) acc+=s.x[i]*row[i];
-         s.logits[v]=acc;
-     }
+     matmul(s.logits.data(), s.x.data(), w.wte.data(), nullptr, E, cfg.vocab_size);
      return s.logits.data();
  }
  

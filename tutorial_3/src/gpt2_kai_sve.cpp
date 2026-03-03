@@ -77,20 +77,27 @@ struct PackedWeights {
     std::vector<std::vector<uint8_t>> c_proj;   // [n_layer]  E   → E
     std::vector<std::vector<uint8_t>> mlp_fc;   // [n_layer]  E   → 4E
     std::vector<std::vector<uint8_t>> mlp_pj;   // [n_layer]  4E  → E
+    std::vector<uint8_t> wte_logits;            // vocab_size → E  (weight-tied logit projection)
 };
 
 // ── run-time state ────────────────────────────────────────────────────────────
 
 struct State {
-    std::vector<float> x, xb, qkv, attn_out, mlp_h, logits;
+    std::vector<float> x, xb, qkv, attn_out, mlp_h, logits, proj_buf;
     std::vector<float> key_cache, val_cache;   // (n_layer, n_ctx, n_embd)
     std::vector<float> att_score;              // (n_head, n_ctx)
 
     void init(const Config &c) {
         int E = c.n_embd;
-        x.assign(E, 0); xb.assign(E, 0); 
+        x.assign(E, 0); xb.assign(E, 0);
         qkv.assign(3*E, 0); attn_out.assign(E, 0);
-        mlp_h.assign(4*E, 0); logits.assign(c.vocab_size, 0);
+        mlp_h.assign(4*E, 0);
+        proj_buf.assign(4*E, 0);   // reusable projection scratch buffer (max dim = 4E)
+        // Pad logits to the next n_step multiple so the last KleidiAI block
+        // can always write a full n_step chunk without overflowing the buffer.
+        const size_t n_step = ukernel.get_n_step();
+        const size_t logits_size = ((size_t)c.vocab_size + n_step - 1) / n_step * n_step;
+        logits.assign(logits_size, 0);
         key_cache.assign((size_t)c.n_layer * c.n_ctx * E, 0);
         val_cache.assign((size_t)c.n_layer * c.n_ctx * E, 0);
         att_score.assign((size_t)c.n_head  * c.n_ctx,    0);
@@ -154,7 +161,10 @@ static void matmul(float* out, const float* x, const uint8_t* rhs_packed,
     const size_t dst_stride_row = (size_t)n_out * sizeof(float);
     const size_t dst_stride_col = sizeof(float);
     const size_t n_step = ukernel.get_n_step();
-    const size_t n_blocks = (size_t)n_out / n_step;
+    // Ceiling division: the last partial block is still run at full n_step width.
+    // The caller must ensure `out` has at least ceil(n_out/n_step)*n_step elements
+    // of writable space (State::logits is allocated with this padding).
+    const size_t n_blocks = ((size_t)n_out + n_step - 1) / n_step;
 
     #pragma omp parallel for schedule(static)
     for (size_t b = 0; b < n_blocks; b++) {
@@ -203,7 +213,14 @@ static void pack_all_weights(const Config &cfg, const Weights &w, PackedWeights 
                         w.mlp_pj_w.data() + (size_t)l*E*4*E,
                         w.mlp_pj_b.data() + (size_t)l*E, 4*E, E);
     }
-    std::cout << "Packed weights for " << cfg.n_layer << " layers\n";
+    // Pack wte for the logit projection (weight tying, no bias).
+    // wte is (vocab_size × n_embd); the projection computes x @ wte^T giving vocab_size outputs.
+    std::vector<float> zero_bias(cfg.vocab_size, 0.0f);
+    pw.wte_logits.resize(kai_get_rhs_packed_size_rhs_pack_kxn_x32p4vlx1b_x32_x32_sve(
+        (size_t)cfg.vocab_size, (size_t)E));
+    pack_weight_rhs(pw.wte_logits.data(), w.wte.data(), zero_bias.data(), E, cfg.vocab_size);
+
+    std::cout << "Packed weights for " << cfg.n_layer << " layers + logit projection\n";
 }
 
 // ── forward pass ─────────────────────────────────────────────────────────────
@@ -268,9 +285,8 @@ static float *forward(int token, int pos,
         }
 
         // Output projection + residual
-        { std::vector<float> p(E);
-        matmul(p.data(), s.attn_out.data(), pw.c_proj[l].data(), E, E);
-        for (int i=0;i<E;i++) s.x[i]+=p[i]; }
+        matmul(s.proj_buf.data(), s.attn_out.data(), pw.c_proj[l].data(), E, E);
+        for (int i=0;i<E;i++) s.x[i]+=s.proj_buf[i];
 
         // ── FFN ───────────────────────────────────────────────────────────
         layernorm(s.xb.data(), s.x.data(),
@@ -279,23 +295,16 @@ static float *forward(int token, int pos,
         matmul(s.mlp_h.data(), s.xb.data(), pw.mlp_fc[l].data(), E, 4*E);
         for (int i=0;i<4*E;i++) s.mlp_h[i]=gelu(s.mlp_h[i]);
 
-        { std::vector<float> p(E);
-        matmul(p.data(), s.mlp_h.data(), pw.mlp_pj[l].data(), 4*E, E);
-        for (int i=0;i<E;i++) s.x[i]+=p[i]; }
+        matmul(s.proj_buf.data(), s.mlp_h.data(), pw.mlp_pj[l].data(), 4*E, E);
+        for (int i=0;i<E;i++) s.x[i]+=s.proj_buf[i];
     }
 
     // 3. Final layer norm
     layernorm(s.x.data(), s.x.data(), w.ln_f_w.data(), w.ln_f_b.data(), E);
 
-    // 4. Logits via weight tying  (vocab_size x n_embd) @ x
-    int V = cfg.vocab_size;
-#pragma omp parallel for schedule(static)
-    for (int v=0;v<V;v++) {
-        const float *row = w.wte.data()+(size_t)v*E;
-        float acc=0;
-        for (int i=0;i<E;i++) acc+=s.x[i]*row[i];
-        s.logits[v]=acc;
-    }
+    // 4. Logits via weight tying: use KleidiAI packed wte for the projection.
+    // logits buffer is padded to the next n_step multiple so the last block is safe.
+    matmul(s.logits.data(), s.x.data(), pw.wte_logits.data(), E, cfg.vocab_size);
     return s.logits.data();
 }
 

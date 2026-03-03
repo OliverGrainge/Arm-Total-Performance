@@ -38,7 +38,7 @@ Weights are written to `models/gpt2/weights.bin` and `models/gpt2/vocab.bin` (an
 
 ```bash
 cmake -S . -B build
-cmake --build build
+cmake --build build --parallel
 ```
 
 ## 4. Run
