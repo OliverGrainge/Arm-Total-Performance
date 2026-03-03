@@ -8,6 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -g")
 
 add_executable(gpt2 src/gpt2.cpp)
+target_compile_definitions(gpt2 PRIVATE GPT2_DEFAULT_MODELS_DIR="${CMAKE_SOURCE_DIR}/models")
 
 # Enable OpenMP where available (e.g. GCC/Clang with libomp). On platforms
 # that don't provide it (like default AppleClang), the build stays
@@ -26,6 +27,7 @@ set(KLEIDIAI_BUILD_BENCHMARK OFF CACHE BOOL "" FORCE)
 add_subdirectory(src/kleidiai EXCLUDE_FROM_ALL)
 
 add_executable(gpt2_kleidiai src/gpt2_kleidiai.cpp)
+target_compile_definitions(gpt2_kleidiai PRIVATE GPT2_DEFAULT_MODELS_DIR="${CMAKE_SOURCE_DIR}/models")
 target_include_directories(gpt2_kleidiai PRIVATE src/kleidiai)
 target_link_libraries(gpt2_kleidiai PRIVATE kleidiai)
 if(OpenMP_CXX_FOUND)
@@ -34,4 +36,3 @@ if(OpenMP_CXX_FOUND)
 else()
     message(STATUS "OpenMP not found; building gpt2_kleidiai without -fopenmp")
 endif()
-

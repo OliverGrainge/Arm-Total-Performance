@@ -5,7 +5,9 @@
 *   g++ -O3 -march=native -fopenmp -std=c++17 -o gpt2 gpt2.cpp -lm
 *
 * Run:
-*   ./gpt2 gpt2_weights.bin gpt2_vocab.bin "Once upon a time" -n 300 -t 0.9
+*   ./gpt2_kleidiai "Once upon a time"
+*   ./gpt2_kleidiai --model gpt2-medium "Once upon a time"
+*   ./gpt2_kleidiai weights.bin vocab.bin "Once upon a time" -n 300 -t 0.9
 *
 * Options:
 *   -n  max new tokens (default 200)
@@ -26,6 +28,10 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+#ifndef GPT2_DEFAULT_MODELS_DIR
+#define GPT2_DEFAULT_MODELS_DIR "models"
+#endif
 
 #include "kai/ukernels/matmul/matmul_clamp_f32_f32_f32p/kai_matmul_clamp_f32_f32_f32p16x1b_6x16_neon_mla.h"
 #include "kai/ukernels/matmul/matmul_clamp_f32_f32_f32p/kai_matmul_clamp_f32_f32_f32p_interface.h"
@@ -455,28 +461,67 @@ static void generate(const std::string &prompt, int max_new,
 
 // ── main ──────────────────────────────────────────────────────────────────────
 
+static std::string default_model_path(const std::string &model, const std::string &file) {
+    return std::string(GPT2_DEFAULT_MODELS_DIR) + "/" + model + "/" + file;
+}
+
 static void usage(const char *p) {
     fprintf(stderr,
-        "Usage: %s weights.bin vocab.bin [prompt] [-n N] [-t T] [-p P]\n", p);
+        "Usage: %s [--model NAME] [--weights PATH --vocab PATH] [prompt] [-n N] [-t T] [-p P]\n"
+        "   or: %s weights.bin vocab.bin [prompt] [-n N] [-t T] [-p P]\n", p, p);
     std::exit(1);
 }
 
 int main(int argc, char **argv) {
-    if (argc < 3) usage(argv[0]);
-    std::string wp=argv[1], vp=argv[2];
-    std::string prompt = (argc>=4 && argv[3][0]!='-') ? argv[3] : "Once upon a time";
-    int max_new=200; float temp=1.0f, topp=0.9f;
-    int start = (argc>=4 && argv[3][0]!='-') ? 4 : 3;
-    for (int i=start; i<argc; i+=2) {
-        if (i+1>=argc) usage(argv[0]);
-        std::string f=argv[i];
-        if      (f=="-n") max_new=std::stoi(argv[i+1]);
-        else if (f=="-t") temp=std::stof(argv[i+1]);
-        else if (f=="-p") topp=std::stof(argv[i+1]);
-        else usage(argv[0]);
+    std::string model = "gpt2";
+    std::string wp = default_model_path(model, "weights.bin");
+    std::string vp = default_model_path(model, "vocab.bin");
+    std::string prompt = "Once upon a time";
+    int max_new = 200;
+    float temp = 1.0f, topp = 0.9f;
+
+    int i = 1;
+    if (argc >= 3 && argv[1][0] != '-' && argv[2][0] != '-') {
+        wp = argv[1];
+        vp = argv[2];
+        i = 3;
+        if (i < argc && argv[i][0] != '-') {
+            prompt = argv[i++];
+        }
+    }
+
+    for (; i < argc; ++i) {
+        std::string f = argv[i];
+        if (f == "--model") {
+            if (++i >= argc) usage(argv[0]);
+            model = argv[i];
+            wp = default_model_path(model, "weights.bin");
+            vp = default_model_path(model, "vocab.bin");
+        } else if (f == "--weights") {
+            if (++i >= argc) usage(argv[0]);
+            wp = argv[i];
+        } else if (f == "--vocab") {
+            if (++i >= argc) usage(argv[0]);
+            vp = argv[i];
+        } else if (f == "-n") {
+            if (++i >= argc) usage(argv[0]);
+            max_new = std::stoi(argv[i]);
+        } else if (f == "-t") {
+            if (++i >= argc) usage(argv[0]);
+            temp = std::stof(argv[i]);
+        } else if (f == "-p") {
+            if (++i >= argc) usage(argv[0]);
+            topp = std::stof(argv[i]);
+        } else if (!f.empty() && f[0] != '-') {
+            prompt = f;
+        } else {
+            usage(argv[0]);
+        }
     }
 
     Config cfg; Weights weights;
+    std::cout << "Weights path: " << wp << "\n";
+    std::cout << "Vocab path: " << vp << "\n";
     load_weights(wp, cfg, weights);
     PackedWeights pw; pack_all_weights(cfg, weights, pw);
     Tokenizer tok; tok.load(vp);

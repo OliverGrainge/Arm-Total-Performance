@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """Export GPT-2 weights + BPE vocab to binary files for gpt2.cpp.
    pip install torch transformers
-   python export_gpt2.py                       # 124M
-   python export_gpt2.py --model gpt2-medium   # 345M
+   python src/export_gpt2.py
+   python src/export_gpt2.py --model gpt2-medium
 """
-import argparse, struct
+import argparse
+from pathlib import Path
+import struct
 import numpy as np
 from transformers import GPT2Model, GPT2Tokenizer
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_MODELS_DIR = REPO_ROOT / "models"
 
 def write_tensor(f, arr, name=""):
     arr = arr.astype("float32")
@@ -69,9 +74,22 @@ def export_vocab(model_name, out_path):
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
-    ap.add_argument('--model',   default='gpt2')
-    ap.add_argument('--weights', default='gpt2_weights.bin')
-    ap.add_argument('--vocab',   default='gpt2_vocab.bin')
+    ap.add_argument('--model', default='gpt2')
+    ap.add_argument('--out-dir', type=Path,
+                    help='Directory to write model artifacts into '
+                         '(default: <repo>/models/<model>/)')
+    ap.add_argument('--weights', type=Path,
+                    help='Override the weights output path '
+                         '(default: <out-dir>/weights.bin)')
+    ap.add_argument('--vocab', type=Path,
+                    help='Override the vocab output path '
+                         '(default: <out-dir>/vocab.bin)')
     a = ap.parse_args()
-    export_weights(a.model, a.weights)
-    export_vocab(a.model,   a.vocab)
+    out_dir = a.out_dir if a.out_dir is not None else DEFAULT_MODELS_DIR / a.model
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    weights_path = a.weights if a.weights is not None else out_dir / 'weights.bin'
+    vocab_path = a.vocab if a.vocab is not None else out_dir / 'vocab.bin'
+
+    export_weights(a.model, weights_path)
+    export_vocab(a.model, vocab_path)
