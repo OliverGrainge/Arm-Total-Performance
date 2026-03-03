@@ -17,6 +17,7 @@
 
  #include <algorithm>
  #include <chrono>
+ #include <climits>
  #include <cmath>
  #include <cstdint>
  #include <cstdlib>

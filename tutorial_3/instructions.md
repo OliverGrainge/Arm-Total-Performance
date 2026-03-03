@@ -5,7 +5,7 @@
 On your Graviton instance (Amazon Linux):
 
 ```bash
-sudo dnf install -y git cmake gcc-c++ python3 python3-pip
+sudo dnf install -y git cmake gcc-c++ libgomp python3 python3-pip
 ```
 
 Clone the repo:
