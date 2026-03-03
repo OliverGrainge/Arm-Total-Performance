@@ -11,7 +11,7 @@ sudo dnf install -y git cmake gcc-c++ python3 python3-pip
 Clone the repo:
 
 ```bash
-git clone https://github.com/OliverGrainge/Arm-Total-Performance.git
+git clone --recurse-submodules https://github.com/OliverGrainge/Arm-Total-Performance.git
 cd Arm-Total-Performance/tutorial_3
 ```
 
@@ -28,6 +28,8 @@ Export GPT-2 weights and vocab:
 ```bash
 python3 src/export_gpt2.py
 python3 src/export_gpt2.py --model gpt2-medium
+python3 src/export_gpt2.py --model gpt2-large
+python3 src/export_gpt2.py --model gpt2-xl
 ```
 
 Weights are written to `models/gpt2/weights.bin` and `models/gpt2/vocab.bin` (and `models/gpt2-medium/` for the medium model).
