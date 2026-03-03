@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cfloat>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
