@@ -33,9 +33,9 @@
 #define GPT2_DEFAULT_MODELS_DIR "models"
 #endif
 
-#include "kai/ukernels/matmul/matmul_clamp_f32_f32_f32p/kai_matmul_clamp_f32_f32_f32p16x1b_6x16_neon_mla.h"
+#include "kai/ukernels/matmul/matmul_clamp_f32_f32_f32p/kai_matmul_clamp_f32_f32_f32p4vlx1b_6x4vl_sve_mla.h"
 #include "kai/ukernels/matmul/matmul_clamp_f32_f32_f32p/kai_matmul_clamp_f32_f32_f32p_interface.h"
-#include "kai/ukernels/matmul/pack/kai_rhs_pack_kxn_x32p16x1b_x32_x32_neon.h"
+#include "kai/ukernels/matmul/pack/kai_rhs_pack_kxn_x32p4vlx1b_x32_x32_sve.h"
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -110,23 +110,23 @@ static void layernorm(float *o, const float *x, const float *w, const float *b, 
 
 
 static const kai_matmul_clamp_f32_f32_f32p_ukernel ukernel = {
-    kai_get_m_step_matmul_clamp_f32_f32_f32p16x1b_6x16_neon_mla,
-    kai_get_n_step_matmul_clamp_f32_f32_f32p16x1b_6x16_neon_mla,
-    kai_get_nr_matmul_clamp_f32_f32_f32p16x1b_6x16_neon_mla,
-    kai_get_kr_matmul_clamp_f32_f32_f32p16x1b_6x16_neon_mla,
-    kai_get_sr_matmul_clamp_f32_f32_f32p16x1b_6x16_neon_mla,
-    kai_get_lhs_offset_matmul_clamp_f32_f32_f32p16x1b_6x16_neon_mla,
-    kai_get_rhs_packed_offset_matmul_clamp_f32_f32_f32p16x1b_6x16_neon_mla,
-    kai_get_dst_offset_matmul_clamp_f32_f32_f32p16x1b_6x16_neon_mla,
-    kai_get_dst_size_matmul_clamp_f32_f32_f32p16x1b_6x16_neon_mla,
-    kai_run_matmul_clamp_f32_f32_f32p16x1b_6x16_neon_mla,
+    kai_get_m_step_matmul_clamp_f32_f32_f32p4vlx1b_6x4vl_sve_mla,
+    kai_get_n_step_matmul_clamp_f32_f32_f32p4vlx1b_6x4vl_sve_mla,
+    kai_get_nr_matmul_clamp_f32_f32_f32p4vlx1b_6x4vl_sve_mla,
+    kai_get_kr_matmul_clamp_f32_f32_f32p4vlx1b_6x4vl_sve_mla,
+    kai_get_sr_matmul_clamp_f32_f32_f32p4vlx1b_6x4vl_sve_mla,
+    kai_get_lhs_offset_matmul_clamp_f32_f32_f32p4vlx1b_6x4vl_sve_mla,
+    kai_get_rhs_packed_offset_matmul_clamp_f32_f32_f32p4vlx1b_6x4vl_sve_mla,
+    kai_get_dst_offset_matmul_clamp_f32_f32_f32p4vlx1b_6x4vl_sve_mla,
+    kai_get_dst_size_matmul_clamp_f32_f32_f32p4vlx1b_6x4vl_sve_mla,
+    kai_run_matmul_clamp_f32_f32_f32p4vlx1b_6x4vl_sve_mla,
 };
 
 
 static void pack_weight_rhs(uint8_t* packed, const float* W, const float* bias,
                            int n_in, int n_out) {
-    const size_t nr = 16, kr = 1, sr = 1;
-    size_t packed_size = kai_get_rhs_packed_size_rhs_pack_kxn_x32p16x1b_x32_x32_neon(
+    const size_t nr = ukernel.get_nr(), kr = ukernel.get_kr(), sr = ukernel.get_sr();
+    size_t packed_size = kai_get_rhs_packed_size_rhs_pack_kxn_x32p4vlx1b_x32_x32_sve(
         (size_t)n_out, (size_t)n_in);
 
     // W is (n_out × n_in). RHS must be (n_in × n_out) = W^T.
@@ -138,7 +138,7 @@ static void pack_weight_rhs(uint8_t* packed, const float* W, const float* bias,
         }
     }
 
-    kai_run_rhs_pack_kxn_x32p16x1b_x32_x32_neon(
+    kai_run_rhs_pack_kxn_x32p4vlx1b_x32_x32_sve(
         1, (size_t)n_out, (size_t)n_in, nr, kr, sr,
         (size_t)n_out * sizeof(float),
         Wt.data(), bias, NULL, packed, 0, NULL);
@@ -182,22 +182,22 @@ static void pack_all_weights(const Config &cfg, const Weights &w, PackedWeights 
     pw.mlp_pj.resize(cfg.n_layer);
 
     for (int l = 0; l < cfg.n_layer; l++) {
-        pw.c_attn[l].resize(kai_get_rhs_packed_size_rhs_pack_kxn_x32p16x1b_x32_x32_neon(3*E, E));
+        pw.c_attn[l].resize(kai_get_rhs_packed_size_rhs_pack_kxn_x32p4vlx1b_x32_x32_sve(3*E, E));
         pack_weight_rhs(pw.c_attn[l].data(),
                         w.c_attn_w.data() + (size_t)l*3*E*E,
                         w.c_attn_b.data() + (size_t)l*3*E, E, 3*E);
 
-        pw.c_proj[l].resize(kai_get_rhs_packed_size_rhs_pack_kxn_x32p16x1b_x32_x32_neon(E, E));
+        pw.c_proj[l].resize(kai_get_rhs_packed_size_rhs_pack_kxn_x32p4vlx1b_x32_x32_sve(E, E));
         pack_weight_rhs(pw.c_proj[l].data(),
                         w.c_proj_w.data() + (size_t)l*E*E,
                         w.c_proj_b.data() + (size_t)l*E, E, E);
 
-        pw.mlp_fc[l].resize(kai_get_rhs_packed_size_rhs_pack_kxn_x32p16x1b_x32_x32_neon(4*E, E));
+        pw.mlp_fc[l].resize(kai_get_rhs_packed_size_rhs_pack_kxn_x32p4vlx1b_x32_x32_sve(4*E, E));
         pack_weight_rhs(pw.mlp_fc[l].data(),
                         w.mlp_fc_w.data() + (size_t)l*4*E*E,
                         w.mlp_fc_b.data() + (size_t)l*4*E, E, 4*E);
 
-        pw.mlp_pj[l].resize(kai_get_rhs_packed_size_rhs_pack_kxn_x32p16x1b_x32_x32_neon(E, 4*E));
+        pw.mlp_pj[l].resize(kai_get_rhs_packed_size_rhs_pack_kxn_x32p4vlx1b_x32_x32_sve(E, 4*E));
         pack_weight_rhs(pw.mlp_pj[l].data(),
                         w.mlp_pj_w.data() + (size_t)l*E*4*E,
                         w.mlp_pj_b.data() + (size_t)l*E, 4*E, E);
