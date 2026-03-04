@@ -83,7 +83,9 @@ When the program finishes generating, it prints a final line like this showing t
 [50 tokens, 17.2837 tok/s]
 ```
 
+<p align="center">
 <img src="assets/gpt_textgen.gif" width="850" alt="Terminal recording of gpt2 generating text and printing its throughput in tokens per second"/>
+</p>
 
 ---
 
@@ -99,7 +101,9 @@ Open ATP and select **Recipes -> CPU Cycle Hotspots**. Set the workload to launc
 
 When the run completes, select the **CPU Hotspots** result to view the **Flame Graph**. Each horizontal bar represents a function. Bars stacked on top of a function are routines it calls, so the graph shows the call stack from caller to callee. Width is proportional to the CPU time spent in that function and everything it calls. Wider bars near the bottom of the graph are the places the CPU is actually executing, so they are the candidates worth investigating.
 
+<p align="center">
 <img src="assets/gpt2_flamegraph.png" width="850" alt="CPU Cycle Hotspots flame graph for gpt2: a single bar dominates the execution time"/>
+</p>
 
 The flame graph shows that most of the program's time is spent in `forward`, and most of that time is inside the `matmul` calls made by `forward`. Now, in the next step, let's quantify exactly how much time is spent where. 
 
@@ -107,7 +111,9 @@ The flame graph shows that most of the program's time is spent in `forward`, and
 
 In the CPU Hotspots run, switch to the **Functions** tab. Here, ATP lists every sampled function alongside its percentage of total cycles that it occupies:
 
+<p align="center">
 <img src="assets/gpt2_functions_table.png" width="850" alt="Functions table for gpt2 showing matmul at roughly 83% of cycles with all other functions combined as a small fraction"/>
+</p>
 
 The profile is clear: `matmul` accounts for about 84% of runtime. That means improving `matmul` should translate directly into higher throughput, but only up to a point: the other ~16% of the program still remains. Even if `matmul` were made infinitely fast, the total speedup would still be capped at about 6.25x.
 
@@ -127,7 +133,9 @@ In ATP, select **Recipes -> Instruction Mix**. Use the same workload and argumen
 
 ATP presents a workload-wide breakdown of retired instruction types. Because `matmul` accounts for about 85% of cycles, this chart is effectively showing you how `matmul` executes:
 
+<p align="center">
 <img src="assets/gpt2_instruction_mix.png" width="850" alt="Instruction Mix for gpt2: Scalar FP accounts for the largest share of retired instructions and the SVE row reads 0%"/>
+</p>
 
 Two things stand out in the chart. First, the largest categories are **Integer** and **Load**. That is what you would expect from a scalar matrix multiply: every iteration must compute addresses and indices, then load `row[j]` and `x[j]` before doing the arithmetic. Second, **Advanced SIMD** and **SVE** are at 0%, so the compiler has not vectorised the dominant loop.
 
@@ -221,11 +229,36 @@ The gap that the baseline profile revealed - SVE at zero on a compute-heavy work
 
 Compare the tok/s figures from both runs:
 
-| Binary | Throughput | SVE % | Scalar FP % |
-|---|---:|---:|---:|
-| `gpt2` | 3.4 tok/s | 0% | ~0% |
-| `gpt2_kai_sve` | 18.0 tok/s | ~54% | ~0% |
-| Improvement | **5.3×** | - | - |
+<table align="center">
+  <thead>
+    <tr>
+      <th>Binary</th>
+      <th>Throughput</th>
+      <th>SVE %</th>
+      <th>Scalar FP %</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>gpt2</code></td>
+      <td>3.4 tok/s</td>
+      <td>0%</td>
+      <td>~0%</td>
+    </tr>
+    <tr>
+      <td><code>gpt2_kai_sve</code></td>
+      <td>18.0 tok/s</td>
+      <td>~54%</td>
+      <td>~0%</td>
+    </tr>
+    <tr>
+      <td>Improvement</td>
+      <td><strong>5.3×</strong></td>
+      <td>-</td>
+      <td>-</td>
+    </tr>
+  </tbody>
+</table>
 
 The throughput increase is the real-world consequence of the instruction-level change ATP measured. No algorithm changed, no data was restructured, no compiler flags were added. The improvement comes entirely from replacing scalar FP instructions with SVE FP instructions in the one function that dominates the runtime.
 

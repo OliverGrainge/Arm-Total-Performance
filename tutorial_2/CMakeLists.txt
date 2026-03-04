@@ -11,3 +11,6 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -g")
 
 add_executable(aos_baseline  src/aos_baseline.cpp)
 add_executable(soa_optimized src/soa_optimized.cpp)
+
+target_link_libraries(aos_baseline  m)
+target_link_libraries(soa_optimized m)

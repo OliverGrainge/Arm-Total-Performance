@@ -15,6 +15,7 @@ In this tutorial, you will use **Arm Total Performance (ATP)** to investigate ex
 - GCC 9+ or Clang 14+
 - CMake 3.16+
 - ATP installed and configured
+- Python 3 with `numpy`, `matplotlib`, and `Pillow` (for visualization only — `pip install numpy matplotlib Pillow`)
 
 ## Terms used in this tutorial
 
@@ -29,7 +30,7 @@ In this tutorial, you will use **Arm Total Performance (ATP)** to investigate ex
 
 ## The workload
 
-The program simulates a particle physics position update. Each iteration advances every particle's position using its velocity:
+The program simulates the kinematic evolution of a **four-arm spiral galaxy**. One million particles are placed on logarithmic spiral arms with a flat rotation curve — inner particles orbit faster than outer ones, so the arms slowly wind up over time. Each iteration advances every particle's position using its velocity:
 
 ```cpp
 p[i].x += p[i].vx * dt;
@@ -37,7 +38,7 @@ p[i].y += p[i].vy * dt;
 p[i].z += p[i].vz * dt;
 ```
 
-This runs over **1,048,576 particles** for **200 iterations**. The algorithm is simple: three multiply-adds per particle per iteration. There is no complex control flow, no branching, no dependencies between particles. On paper this loop should be entirely memory-bound and highly prefetcher-friendly.
+This runs over **1,048,576 particles** for **200 iterations**. The algorithm is simple: three multiply-adds per particle per iteration. There is no complex control flow, no branching, no dependencies between particles. On paper this loop should be memory-bound and highly prefetcher-friendly.
 
 The particle struct looks like this:
 
@@ -64,7 +65,27 @@ make -j4
 ./aos_baseline
 ```
 
-The binary prints a checksum. Record it — you will use it later to verify that any optimised version produces identical results.
+The binary prints a checksum. Record it, you will use it later to verify that any optimised version produces identical results.
+
+### Visualise the simulation
+
+To see the galaxy evolve, pass `--visualize` to either binary. This writes subsampled position snapshots to `build/galaxy_aos.bin` (one frame before the loop starts, then one every 10 iterations — 21 frames in total). A Python script reads the file and produces a static PNG and an animated GIF:
+
+```bash
+# From tutorial_2/build/
+./aos_baseline --visualize
+
+# From tutorial_2/
+python3 scripts/visualize.py          # reads build/galaxy_aos.bin by default
+# outputs: assets/galaxy_aos.gif  (full animation)
+```
+
+> **Note:** Omit `--visualize` when profiling with ATP. The flag adds file I/O that is not part of the workload being measured.
+
+<figure align="center">
+<img src="./assets/galaxy_aos.gif" width="500" alt="Animated GIF showing differential rotation of the spiral galaxy"/>
+<figcaption>Galaxy evolution over 200 iterations. Inner particles orbit faster, causing the arms to wind up — visible as increasing curvature from the first frame to the last.</figcaption>
+</figure>
 
 ---
 
@@ -81,23 +102,24 @@ In ATP:
 3. Set the workload to launch `aos_baseline`.
 4. Click **Run Recipe**.
 
-![Memory Access recipe configured for aos_baseline](./assets/aos_recipe_setup.png)
-*Memory Access recipe ready to run against `aos_baseline`.*
+<figure align="center">
+<img src="./assets/aos_recipe_setup.png" width="500" alt="Memory Access recipe configured for aos_baseline"/>
+<figcaption>Memory Access recipe ready to run against <code>aos_baseline</code>.</figcaption>
+</figure>
 
 ### Read the Latency Breakdown table
 
 After the run completes, open the **Latency Breakdown** tab:
 
-| Function | #SPE Samples | L1C % Loads | L1C Avg Latency | L1C Contrib (cyc) | L1C Contrib (%) | L2C % Loads | L2C Avg Latency | L2C Contrib (cyc) | L2C Contrib (%) |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| main | 63,990 | 68.12 | 28.89 | 19.68 | 97.83 | 1.01 | 43.06 | 0.44 | 2.17 |
 
 > **Note:** `update_positions` does not appear as a separate row because the compiler inlines it into `main`. All samples are attributed to `main`.
 
-![AoS Latency Breakdown showing 63,990 SPE samples and 68.12% L1C hit rate](./assets/aos_latency_breakdown.png)
-*AoS Latency Breakdown: 63,990 SPE samples on `main`, L1C % = 68.12%, L1C Avg Latency = 28.89 cycles.*
+<figure align="center">
+<img src="./assets/aos_latency_breakdown.png" alt="AoS Latency Breakdown showing 63,990 SPE samples and 68.12% L1C hit rate"/>
+<figcaption>AoS Latency Breakdown: 63,990 SPE samples on <code>main</code>, L1C % = 68.12%, L1C Avg Latency = 28.89 cycles.</figcaption>
+</figure>
 
-At this point, don't jump to conclusions — just note what the numbers say:
+At this point, don't jump to conclusions, just note what the numbers say:
 
 - **L1C % Loads = 68.12%** — only about two-thirds of sampled loads resolve in L1 cache. The rest miss to L2C or beyond.
 - **L1C Avg Latency = 28.89 cycles** — this is high for L1C hits. A true L1C hit on Graviton is typically under 10 cycles. An average of ~29 cycles suggests many of these "L1C" accesses are actually stalling while lines are being refetched.
@@ -147,13 +169,15 @@ Line 22:    803      p[i].z += p[i].vz * dt;
 
 Total on the loop body: **5,061 periodic samples**.
 
-![Source Code Inspector for aos_baseline showing periodic samples on the update loop lines](./assets/aos_source.png)
-*Source Code Inspector (`aos_baseline.cpp`): the three position-update lines carry 3,782 + 268 + 803 = 4,853 samples, plus 208 on the loop control — 5,061 total.*
+<figure align="center">
+<img src="./assets/aos_source.png" alt="Source Code Inspector for aos_baseline showing periodic samples on the update loop lines"/>
+<figcaption>Source Code Inspector (<code>aos_baseline.cpp</code>): the three position-update lines carry 3,782 + 268 + 803 = 4,853 samples, plus 208 on the loop control, 5,061 total.</figcaption>
+</figure>
 
 Two things stand out:
 
-1. **The sample count is high overall** — 5,061 samples on three simple multiply-add lines.
-2. **The distribution is heavily skewed** — line 20 (`p[i].x += ...`) accounts for 3,782 of the 5,061 samples. Lines 21 and 22 combined carry only about 1,071. Why would the `x` update be nearly 4× more expensive than `y` or `z`?
+1. **The sample count is high overall:** 5,061 samples on three simple multiply-add lines.
+2. **The distribution is heavily skewed:** line 20 (`p[i].x += ...`) accounts for 3,782 of the 5,061 samples. Lines 21 and 22 combined carry only about 1,071. Why would the `x` update be nearly 4× more expensive than `y` or `z`?
 
 ---
 
@@ -164,7 +188,7 @@ Now we have two pieces of evidence to connect:
 - **Memory Access** shows a 68% L1C hit rate and ~29-cycle average L1C latency on a loop that should be fully prefetchable.
 - **CPU Cycle Hotspots** shows the `x` update line carrying ~75% of all loop samples, far more than `y` or `z`.
 
-The `x` field is at **offset 0** in the `ParticleAoS` struct. Since each struct is exactly 64 bytes — one cache line — the access to `p[i].x` is the access that triggers the full cache line load for that particle. The `y` and `z` fields at offsets 4 and 8 are already in the loaded line, so they resolve quickly. Line 20 is paying the memory latency for the entire struct, not just for `x`.
+The `x` field is at **offset 0** in the `ParticleAoS` struct. Since each struct is exactly 64 bytes, one cache line, the access to `p[i].x` is the access that triggers the full cache line load for that particle. The `y` and `z` fields at offsets 4 and 8 are already in the loaded line, so they resolve quickly. Line 20 is paying the memory latency for the entire struct, not just for `x`.
 
 This leads to the core question: **what is in that 64-byte cache line?**
 
@@ -174,7 +198,7 @@ ParticleAoS: [x y z vx vy vz | mass charge temp | pressure energy density | spin
              |<-------------------------------- 64 bytes loaded -------------------------------->|
 ```
 
-Each cache line fetch loads 64 bytes, but the update loop only uses the first 24 bytes (the six position and velocity floats). The remaining 40 bytes — `mass`, `charge`, `temperature`, `pressure`, `energy`, `density`, `spin_*`, and padding — are loaded, occupy cache space, and are evicted without ever being read. This is **37.5% cache line utilisation** (24 / 64).
+Each cache line fetch loads 64 bytes, but the update loop only uses the first 24 bytes (the six position and velocity floats). The remaining 40 bytes, `mass`, `charge`, `temperature`, `pressure`, `energy`, `density`, `spin_*`, and padding, are loaded, occupy cache space, and are evicted without ever being read. This is **37.5% cache line utilisation** (24 / 64).
 
 The consequences explain exactly what ATP reported:
 
@@ -186,11 +210,11 @@ The diagnosis is clear: **the data layout is the bottleneck**. The struct packs 
 
 ---
 
-## The fix — restructure from Array-of-Structures to Structure-of-Arrays
+## The fix: restructure from Array-of-Structures to Structure-of-Arrays
 
 The fix is to separate hot fields from cold fields so that each cache line contains only data the loop actually uses. The standard approach is a **Structure-of-Arrays (SoA)** layout: instead of one struct per particle with all fields interleaved, you use one array per field so that all particles' values for a given field are contiguous in memory.
 
-Open `src/soa_optimized.cpp`. The algorithm is identical — the only change is the data layout:
+Open `src/soa_optimized.cpp`. The algorithm is identical, the only change is the data layout:
 
 **Before (Array-of-Structures):** one struct per particle, all fields interleaved:
 
@@ -198,9 +222,9 @@ Open `src/soa_optimized.cpp`. The algorithm is identical — the only change is 
 struct ParticleAoS {
     float x, y, z;                   // used in hot loop
     float vx, vy, vz;                // used in hot loop
-    float mass, charge, temperature; // not used — but loaded anyway
-    float pressure, energy, density; // not used — but loaded anyway
-    float spin_x, spin_y, spin_z;    // not used — but loaded anyway
+    float mass, charge, temperature; // not used, but loaded anyway
+    float pressure, energy, density; // not used, but loaded anyway
+    float spin_x, spin_y, spin_z;    // not used, but loaded anyway
     float pad;
 };
 std::vector<ParticleAoS> particles(N); // 64 MB working set
@@ -210,8 +234,8 @@ std::vector<ParticleAoS> particles(N); // 64 MB working set
 
 ```cpp
 struct ParticlesSoA {
-    std::vector<float> x, y, z;       // used in hot loop — 3 × 4 MB
-    std::vector<float> vx, vy, vz;    // used in hot loop — 3 × 4 MB
+    std::vector<float> x, y, z;       // used in hot loop, 3 × 4 MB
+    std::vector<float> vx, vy, vz;    // used in hot loop, 3 × 4 MB
     std::vector<float> mass, charge, temperature; // separate, never loaded
     std::vector<float> pressure, energy, density; // separate, never loaded
     std::vector<float> spin_x, spin_y, spin_z;    // separate, never loaded
@@ -220,9 +244,9 @@ struct ParticlesSoA {
 
 Why this should fix the problem:
 
-1. **Only hot arrays are loaded.** The update loop touches `x`, `y`, `z`, `vx`, `vy`, `vz` — six contiguous arrays totalling 6 × 4 MB = **24 MB**, down from 64 MB.
+1. **Only hot arrays are loaded.** The update loop touches `x`, `y`, `z`, `vx`, `vy`, `vz`, six contiguous arrays totalling 6 × 4 MB = **24 MB**, down from 64 MB.
 2. **100% cache line utilisation.** Each 64-byte line of `particles.x` contains 16 consecutive `x` values (16 × 4 bytes = 64 bytes), all consumed before eviction.
-3. **No code changes beyond data access syntax.** The loop body changes from `p[i].x` to `p.x[i]` — the algorithm, iteration count, and arithmetic are identical.
+3. **No code changes beyond data access syntax.** The loop body changes from `p[i].x` to `p.x[i]`, and the algorithm, iteration count, and arithmetic are identical.
 
 Build and verify:
 
@@ -235,21 +259,22 @@ Confirm the checksum matches the AoS baseline. The same computation on the same 
 
 ---
 
-## Re-profile with Memory Access — verify the fix
+## Re-profile with Memory Access to verify the fix
 
 Run the Memory Access recipe again, this time with `soa_optimized` as the workload.
 
-![Memory Access recipe configured for soa_optimized](./assets/soa_recipe_setup.png)
-*Memory Access recipe ready to run against `soa_optimized`.*
+<figure align="center">
+<img src="./assets/soa_recipe_setup.png" width="500" alt="Memory Access recipe configured for soa_optimized"/>
+<figcaption>Memory Access recipe ready to run against <code>soa_optimized</code>.</figcaption>
+</figure>
 
 ### Read the Latency Breakdown table
 
-| Function | #SPE Samples | L1C % Loads | L1C Avg Latency | L1C Contrib (cyc) | L1C Contrib (%) | Potential Improvement (cyc) |
-|---|---:|---:|---:|---:|---:|---:|
-| main | 63,602 | 99.98 | 10.76 | 10.76 | 100 | 190,052 |
 
-![SoA Latency Breakdown showing 99.98% L1C hit rate and 10.76 cycle avg latency](./assets/soa_latency_breakdown.png)
-*SoA Latency Breakdown: L1C % = 99.98%, L1C Avg Latency = 10.76 cycles. All memory latency now comes from L1C — L2C and DRAM contributions are negligible.*
+<figure align="center">
+<img src="./assets/soa_latency_breakdown.png" alt="SoA Latency Breakdown showing 99.98% L1C hit rate and 10.76 cycle avg latency"/>
+<figcaption>SoA Latency Breakdown: L1C % = 99.98%, L1C Avg Latency = 10.76 cycles. All memory latency now comes from L1C, and L2C and DRAM contributions are negligible.</figcaption>
+</figure>
 
 Compare against the baseline:
 
@@ -268,7 +293,7 @@ The memory hierarchy is now behaving as expected for a simple stride-1 loop.
 
 ---
 
-## Re-map hotspot to source with CPU Cycle Hotspots — verify the fix
+## Re-map hotspot to source with CPU Cycle Hotspots to verify the fix
 
 Run **CPU Cycle Hotspots** with `soa_optimized`. Open **View Source Code** for `main` and navigate to lines 19–22:
 
@@ -279,17 +304,21 @@ Line 21:  807      p.y[i] += p.vy[i] * dt;
 Line 22:  927      p.z[i] += p.vz[i] * dt;
 ```
 
-Total on the loop body: **2,700 periodic samples**, down from 5,061 — a **47% reduction**.
+Total on the loop body: **2,700 periodic samples**, down from 5,061, a **47% reduction**.
 
-![Source Code Inspector for soa_optimized showing fewer periodic samples](./assets/soa_source.png)
-*Source Code Inspector (`soa_optimized.cpp`): 756 + 807 + 927 = 2,490 samples on the update lines plus 210 on loop control — 2,700 total.*
+<figure align="center">
+<img src="./assets/soa_source.png" alt="Source Code Inspector for soa_optimized showing fewer periodic samples"/>
+<figcaption>Source Code Inspector (<code>soa_optimized.cpp</code>): 756 + 807 + 927 = 2,490 samples on the update lines plus 210 on loop control, 2,700 total.</figcaption>
+</figure>
 
 
-Notice the second confirmation: **the distribution across lines is now even** (756, 807, 927). In the AoS profile, line 20 carried 75% of all samples because it triggered the per-struct cache line fetch. In SoA, each array is independent — no single line bears the cost of loading unrelated data. The skew has disappeared, which is exactly what the diagnosis in Section 4 predicted.
+Notice the second confirmation: **the distribution across lines is now even** (756, 807, 927). In the AoS profile, line 20 carried 75% of all samples because it triggered the per-struct cache line fetch. In SoA, each array is independent, and no single line bears the cost of loading unrelated data. The skew has disappeared, which is exactly what the diagnosis in Section 4 predicted.
 
 ---
 
 ## Summary of results
+
+<div align="center">
 
 | Metric | `aos_baseline` | `soa_optimized` | Change |
 |---|---:|---:|---|
@@ -300,11 +329,13 @@ Notice the second confirmation: **the distribution across lines is now even** (7
 | **Sample distribution (x / y / z)** | 3,782 / 268 / 803 | 756 / 807 / 927 | Skew eliminated |
 | **Working set** | 64 MB | 24 MB | −62.5% |
 | **Cache line utilisation** | 37.5% | 100% | +62.5 pp |
-| **Algorithm change** | — | — | None |
+| **Algorithm change** | N/A | N/A | None |
+
+</div>
 
 The improvement came entirely from restructuring data, not from changing the algorithm, adding compiler hints, or rewriting the loop. ATP's two recipes provided the evidence at each step: Memory Access revealed the cache problem, CPU Cycle Hotspots pinpointed the source lines and confirmed the skew pattern that pointed to per-struct cache line fetches, and both recipes verified the fix after the change.
 
-> **Note on Graviton vs other hardware.** The screenshots were taken on a development machine with a large L3 cache. On Graviton3 (32 MB L3), the 64 MB AoS working set exceeds L3, so the AoS profile will additionally show significant LLC and DRAM traffic — the improvement from SoA will be even more pronounced.
+> **Note on Graviton vs other hardware.** The screenshots were taken on a development machine with a large L3 cache. On Graviton3 (32 MB L3), the 64 MB AoS working set exceeds L3, so the AoS profile will additionally show significant LLC and DRAM traffic, and the improvement from SoA will be even more pronounced.
 
 
 ---
@@ -314,5 +345,5 @@ The improvement came entirely from restructuring data, not from changing the alg
 - Keep `-g` enabled so ATP can resolve source locations to line numbers.
 - Keep the problem size at `N = 1 << 20` and `iters = 200` for stable SPE sampling; smaller sizes may not produce enough samples for a reliable breakdown.
 - Compare like-for-like runs: same Graviton instance, same CPU frequency policy, no other heavy workloads running concurrently.
-- If `update_positions` does not appear as a separate function in ATP (shows only `main`), this is expected — the compiler inlines static functions. Click `main` and navigate to the `update_positions` body in the source view.
+- If `update_positions` does not appear as a separate function in ATP (shows only `main`), this is expected because the compiler inlines static functions. Click `main` and navigate to the `update_positions` body in the source view.
 - If ATP does not resolve source lines at all (shows `??`), ensure you point the source root to the `tutorial_2/src` directory and verify debug symbols are present (`file aos_baseline` should show `with debug_info`).

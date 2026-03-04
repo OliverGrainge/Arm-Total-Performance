@@ -129,13 +129,17 @@ We suspect this is slow, but *why*? This is where ATP comes in.
 
 Open ATP and select **Recipes -> Topdown**. Choose the `matmul_naive` executable as the target:
 
+<p align="center">
 <img src="assets/run_recipe.png" width="850" alt="Selecting the Topdown recipe in ATP"/>
+</p>
 
 ATP will collect hardware performance counter data for approximately 30 seconds. When it finishes, it opens the **Summary** view automatically.
 
 ### Step 2: Read the Summary view
 
+<p align="center">
 <img src="assets/naive_topdown.png" width="850" alt="ATP Topdown summary for naive matmul"/>
+</p>
 
 Look at the four top-level bars. **Backend Bound** dominates at roughly 80%. This tells you that the frontend is supplying micro-ops adequately, but the backend cannot execute them fast enough because it is stalled. Retiring is low at around 10%, meaning most of the CPU's capacity is wasted waiting rather than doing useful work.
 
@@ -145,7 +149,9 @@ Look at the four top-level bars. **Backend Bound** dominates at roughly 80%. Thi
 
 From the Summary view, we already know the workload is strongly **Backend Bound**. The next step is to inspect the cache effectiveness metrics for this function to see whether those backend stalls are likely to be coming from the memory system:
 
+<p align="center">
 <img src="assets/naive_cache_effectiveness.png" width="850" alt="Cache miss ratios for naive matmul"/>
+</p>
 
 The cache metrics show that the naive kernel uses the hierarchy badly, especially at **L1D**, so many loads have to fall through to lower levels before they hit.
 
@@ -163,7 +169,9 @@ Now you know *what* the bottleneck is: poor cache locality caused by the `B[k*N 
 
 The animation below makes this concrete on a small matrix. Watch the memory strip under B: each consecutive access lands N positions further along, leaving a gap the cache has no opportunity to prefetch. Contrast this with A (teal), whose addresses step forward by one element at a time.
 
+<p align="center">
 <img src="assets/naive_memory_access.gif" width="850" alt="Naive matmul memory access pattern: B strides by N on every k-step"/>
+</p>
 
 This is why the **L1D miss ratio is so high**. The inner loop touches data that is far apart in memory, so it gets very little reuse at the top of the hierarchy. Many of those misses are recovered in L2 or LLC, but some still continue to DRAM.
 
@@ -205,19 +213,25 @@ void matmul_tiled(const float* A, const float* B, float* C, int M, int K, int N)
 
 The animation below shows how tiling changes the access pattern. The dashed box marks the active tile in each matrix. Within a tile the innermost loop sweeps `j`, so B moves one element at a time across a short row, and the B memory strip shows a compact, contiguous block of addresses rather than the scattered jumps seen in the naive version.
 
+<p align="center">
 <img src="assets/tiled_memory_access.gif" width="850" alt="Tiled matmul memory access pattern: B accesses are sequential within each tile"/>
+</p>
 
 ### Re-profile: did it work?
 
 Run the Topdown recipe again, this time on `matmul_tiled`. Always re-profile after a change and never assume your optimisation had the intended effect.
 
+<p align="center">
 <img src="assets/tiled_topdown.png" width="850" alt="ATP Topdown summary for tiled matmul"/>
+</p>
 
 Comparing the Summary view with the naive run, the improvement is dramatic. **Retiring** jumped from ~8% to 66.5%, meaning the pipeline is now doing useful work most of the time. **Backend Bound** dropped from ~78% to 19%, showing that memory stalls have been largely eliminated.
 
 To confirm that this shift really comes from better locality, check cache effectiveness in the Functions tab:
 
+<p align="center">
 <img src="assets/tiled_cache_effectiveness.png" width="850" alt="Cache metrics for tiled matmul"/>
+</p>
 
 The cache numbers confirm the fix worked. Compared with the naive kernel, the tiled version shows dramatically better cache behaviour, especially at **L1D**, and essentially eliminates meaningful traffic to deeper cache levels.
 
@@ -231,7 +245,9 @@ The optimisation has done its job: the tiled kernel has turned a poor-locality, 
 
 With the memory bottleneck removed, look at the **Retiring** breakdown. In ATP, the **Speculative Operation Mix** panel shows what kinds of instructions are contributing to Retiring:
 
+<p align="center">
 <img src="assets/tiled_retiring.png" width="200" alt="Operation mix for tiled matmul"/>
+</p>
 
 The operation mix reveals the next problem. Loads account for 28.3% of operations, stores 14.0%, integer operations 29.1%, floating-point scalar operations 14.0%, and **Advanced SIMD 0%**. In other words, Retiring is high, but the arithmetic is still entirely scalar. Every multiply-add is processing one `float` at a time. Arm NEON can process 4 floats per instruction, so the code is leaving roughly 4x throughput on the table.
 
@@ -302,7 +318,9 @@ void matmul_neon(const float* A, const float* B, float* C, int M, int K, int N) 
 
 Run the Topdown recipe on `matmul_neon`. Since the goal of this change was to introduce SIMD arithmetic, go straight to the **Speculative Operation Mix** to verify that the instruction mix has changed:
 
+<p align="center">
 <img src="assets/neon_retiring.png" width="350" alt="Operation mix for NEON matmul"/>
+</p>
 
 The result confirms the optimisation worked. Scalar floating-point dropped from 14% to 0%, and **Advanced SIMD** jumped from 0% to 31%. Every multiply-add is now a NEON instruction processing 4 floats at once. Each iteration of the inner k-loop performs 4 vector FMAs (16 FLOPs) from roughly 5 memory operations, a much better compute-to-memory ratio than the scalar version.
 
