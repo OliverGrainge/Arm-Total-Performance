@@ -41,7 +41,7 @@ The program, `gpt2`, is a text generation engine. Given a short prompt, it gener
 ```text
 $ ./gpt2 --model gpt2-medium "Once upon a time"
 Once upon a time there was a man who had a great deal of money...
-[200 tokens, 3.2 tok/s]
+[200 tokens, 3.4 tok/s]
 ```
 
 > **About GPT-2:** GPT-2 ([Radford et al., 2019](https://cdn.openai.com/better-language-models/language_models_are_unsupervised_multitask_learners.pdf)) was one of the most influential early language models, demonstrating that large-scale unsupervised training could produce surprisingly coherent text. By modern standards it is small, so do not expect ChatGPT-quality output.
@@ -80,7 +80,7 @@ cd build
 When the program finishes generating, it prints a final line like this showing the generation throughput in tokens per second. Write it down; this is your baseline measurement. Next, you will use ATP to identify where the program spends its time so you can start improving its performance.
 
 ```text
-[50 tokens, 17.2837 tok/s]
+[50 tokens, 3.4 tok/s]
 ```
 
 <p align="center">
@@ -105,7 +105,7 @@ When the run completes, select the **CPU Hotspots** result to view the **Flame G
 <img src="assets/gpt2_flamegraph.png" width="850" alt="CPU Cycle Hotspots flame graph for gpt2: a single bar dominates the execution time"/>
 </p>
 
-The flame graph shows that most of the program's time is spent in `forward`, and most of that time is inside the `matmul` calls made by `forward`. Now, in the next step, let's quantify exactly how much time is spent where. 
+The flame graph shows that most of the program's time is spent in `forward`, and most of that time is inside the `matmul` calls made by `forward`. Now, in the next step, let's quantify exactly how much time is spent where.
 
 ### Step 3: Read the Functions table
 
@@ -117,7 +117,7 @@ In the CPU Hotspots run, switch to the **Functions** tab. Here, ATP lists every 
 
 The profile is clear: `matmul` accounts for about 84% of runtime. That means improving `matmul` should translate directly into higher throughput, but only up to a point: the other ~16% of the program still remains. Even if `matmul` were made infinitely fast, the total speedup would still be capped at about 6.25x.
 
-**Your diagnosis so far:** `matmul` accounts for ~85% of cycles - the clear target. Now the question changes. We know *where* the time goes. The next question is: *how* is `matmul` spending it? Is the hardware being used effectively, or is there capacity being wasted?
+**Your diagnosis so far:** `matmul` accounts for ~84% of cycles - the clear target. Now the question changes. We know *where* the time goes. The next question is: *how* is `matmul` spending it? Is the hardware being used effectively, or is there capacity being wasted?
 
 ---
 
@@ -131,10 +131,10 @@ In ATP, select **Recipes -> Instruction Mix**. Use the same workload and argumen
 
 ### Step 2: Read the breakdown
 
-ATP presents a workload-wide breakdown of retired instruction types. Because `matmul` accounts for about 85% of cycles, this chart is effectively showing you how `matmul` executes:
+ATP presents a workload-wide breakdown of retired instruction types. Because `matmul` accounts for about 84% of cycles, this chart is effectively showing you how `matmul` executes:
 
 <p align="center">
-<img src="assets/gpt2_instruction_mix.png" width="850" alt="Instruction Mix for gpt2: Scalar FP accounts for the largest share of retired instructions and the SVE row reads 0%"/>
+<img src="assets/gpt2_instruction_mix.png" width="850" alt="Instruction Mix for gpt2: Scalar FP accounts for 16.7% of retired instructions and the SVE row reads 0%"/>
 </p>
 
 Two things stand out in the chart. First, the largest categories are **Integer** and **Load**. That is what you would expect from a scalar matrix multiply: every iteration must compute addresses and indices, then load `row[j]` and `x[j]` before doing the arithmetic. Second, **Advanced SIMD** and **SVE** are at 0%, so the compiler has not vectorised the dominant loop.
@@ -143,7 +143,7 @@ The other visible bars match the structure of a simple scalar matrix multiply:
 
 - **Integer**: loop counters and address calculations (`i`, `j`, and `row`) generate a large number of integer instructions.
 - **Loads**: each inner-loop iteration reads `row[j]` and `x[j]`, so scalar loads are also a large share of the mix.
-- **Scalar FP**: each `acc += row[j] * x[j]` is a scalar floating-point multiply-accumulate, but it is only one part of the loop body.
+- **Scalar FP**: each `acc += row[j] * x[j]` is a scalar floating-point multiply-accumulate, accounting for 16.7% of retired instructions.
 - **Branch**: the `for` loop conditions (`j < n_in`, `i < n_out`) and the `b ?` ternary each produce branch instructions.
 - **SVE / Advanced SIMD**: **0%**. No NEON or SVE instructions appear in the hot path.
 
@@ -215,7 +215,7 @@ In ATP, select **Recipes -> Instruction Mix**, set the workload to `gpt2_kai_sve
 <img src="assets/gpt2_kai_sve_instruction_mix.png" width="500" alt="Instruction Mix for gpt2_kai_sve: SVE instructions now account for the largest share of retired instructions at roughly 53%, with Floating Point Operations near zero"/>
 </p>
 
-The chart has changed dramatically. **SVE Operations** are now the single largest category at roughly 53% of all retired instructions - up from 0% in the baseline. **Floating Point Operations** have collapsed to near zero. This is the inversion the diagnosis predicted: the processor is now spending the majority of its arithmetic work in 256-bit vector instructions rather than scalar ones.
+The chart has changed dramatically. **SVE Operations** are now the single largest category at roughly 53% of all retired instructions - up from 0% in the baseline. **Scalar FP Operations** have collapsed to near zero. This is the inversion the diagnosis predicted: the processor is now spending the majority of its arithmetic work in 256-bit vector instructions rather than scalar ones.
 
 The **Load Operations** bar (~34%) is higher than in the baseline. This is a direct side-effect of the packed weight layout: the microkernel loads a wide tile of weight data per inner-loop iteration, so loads are a larger fraction of the total instruction stream even though the absolute number of loads has gone down.
 
@@ -243,17 +243,17 @@ Compare the tok/s figures from both runs:
       <td><code>gpt2</code></td>
       <td>3.4 tok/s</td>
       <td>0%</td>
-      <td>~0%</td>
+      <td>16.7%</td>
     </tr>
     <tr>
       <td><code>gpt2_kai_sve</code></td>
       <td>18.0 tok/s</td>
-      <td>~54%</td>
+      <td>~53%</td>
       <td>~0%</td>
     </tr>
     <tr>
       <td>Improvement</td>
-      <td><strong>5.3×</strong></td>
+      <td><strong>5.3x</strong></td>
       <td>-</td>
       <td>-</td>
     </tr>

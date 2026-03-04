@@ -92,19 +92,28 @@ static void init_galaxy(ParticleAoS* p, int n) {
 }
 
 int main(int argc, char* argv[]) {
-    const int   N     = 1 << 20; // 1,048,576 particles — working set = 64 MB
-    const int   iters = 200;
+    const int   N              = 1 << 20; // 1,048,576 particles — working set = 64 MB
+    const int   default_iters  = 200;
+    const int   vis_iters      = 1000;
     const float dt    = 0.005f;
 
     // --visualize: dump subsampled position snapshots for the Python visualiser.
     // Omit this flag when profiling with ATP to avoid I/O overhead.
-    const bool do_vis = (argc > 1 && strcmp(argv[1], "--visualize") == 0);
+    bool do_vis = false;
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--visualize") == 0) {
+            do_vis = true;
+            break;
+        }
+    }
+
+    const int iters = do_vis ? vis_iters : default_iters;
 
     // Subsample 1-in-16 particles for compact output (~65 k points per frame).
     const int vis_stride   = 16;
     const int vis_interval = 10;  // dump every 10 iterations
     const int vis_n        = N / vis_stride;
-    const int vis_frames   = 1 + iters / vis_interval; // frame 0 + 20 evolved frames
+    const int vis_frames   = 1 + iters / vis_interval;
 
     std::vector<ParticleAoS> particles(N);
     init_galaxy(particles.data(), N);

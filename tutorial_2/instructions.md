@@ -1,5 +1,4 @@
-# Tutorial 2: Optimising a Memory-Bound Workload with ATP - Memory Access + CPU Cycle Hotspots
-
+# Tutorial 2: Optimising a Memory-Bound Workload with Arm-Total-Performance
 Memory bottlenecks are common on modern CPUs and often hard to spot without the right tools. A loop with simple arithmetic, no branching, and no data dependencies can still run far below its theoretical peak, and the cause is frequently a data layout problem rather than anything in the algorithm itself.
 
 In this tutorial, you will use **Arm Total Performance (ATP)** to investigate exactly this kind of problem on **AWS Graviton**. Starting from a particle physics position-update loop with a subtle data layout inefficiency, you will use ATP's **Memory Access** recipe to measure cache behaviour, **CPU Cycle Hotspots** to map the cost to specific source lines, and both together to confirm the fix once applied. By the end of this tutorial, you will know how to:
@@ -15,7 +14,7 @@ In this tutorial, you will use **Arm Total Performance (ATP)** to investigate ex
 - GCC 9+ or Clang 14+
 - CMake 3.16+
 - ATP installed and configured
-- Python 3 with `numpy`, `matplotlib`, and `Pillow` (for visualization only — `pip install numpy matplotlib Pillow`)
+- Python 3 with `numpy`, `matplotlib`, and `Pillow` (for visualization only -- `pip install numpy matplotlib Pillow`)
 
 ## Terms used in this tutorial
 
@@ -30,7 +29,7 @@ In this tutorial, you will use **Arm Total Performance (ATP)** to investigate ex
 
 ## The workload
 
-The program simulates the kinematic evolution of a **four-arm spiral galaxy**. One million particles are placed on logarithmic spiral arms with a flat rotation curve — inner particles orbit faster than outer ones, so the arms slowly wind up over time. Each iteration advances every particle's position using its velocity:
+The program simulates the kinematic evolution of a **four-arm spiral galaxy**. One million particles are placed on logarithmic spiral arms with a flat rotation curve -- inner particles orbit faster than outer ones, so the arms slowly wind up over time. Each iteration advances every particle's position using its velocity:
 
 ```cpp
 p[i].x += p[i].vx * dt;
@@ -50,10 +49,10 @@ struct ParticleAoS {
     float pressure, energy, density;
     float spin_x, spin_y, spin_z;
     float pad;
-};  // 16 floats × 4 bytes = 64 bytes per particle
+};  // 16 floats x 4 bytes = 64 bytes per particle
 ```
 
-Each particle carries 16 fields, but the update loop only reads and writes six of them (`x`, `y`, `z`, `vx`, `vy`, `vz`). 
+Each particle carries 16 fields, but the update loop only reads and writes six of them (`x`, `y`, `z`, `vx`, `vy`, `vz`).
 
 ### Build and run
 
@@ -69,7 +68,7 @@ The binary prints a checksum. Record it, you will use it later to verify that an
 
 ### Visualise the simulation
 
-To see the galaxy evolve, pass `--visualize` to either binary. This writes subsampled position snapshots to `build/galaxy_aos.bin` (one frame before the loop starts, then one every 10 iterations — 21 frames in total). A Python script reads the file and produces a static PNG and an animated GIF:
+To see the galaxy evolve, pass `--visualize` to either binary. Visualisation mode keeps the same particle count but extends the run to **1,000 iterations** so the winding is much easier to see. It writes subsampled position snapshots to `build/galaxy_aos.bin` (one frame before the loop starts, then one every 10 iterations -- **101 frames total**). A Python script reads the file and produces an animated GIF of the simulation. Run the commands below to generate the simulation you can see below.
 
 ```bash
 # From tutorial_2/build/
@@ -84,7 +83,7 @@ python3 scripts/visualize.py          # reads build/galaxy_aos.bin by default
 
 <figure align="center">
 <img src="./assets/galaxy_aos.gif" width="500" alt="Animated GIF showing differential rotation of the spiral galaxy"/>
-<figcaption>Galaxy evolution over 200 iterations. Inner particles orbit faster, causing the arms to wind up — visible as increasing curvature from the first frame to the last.</figcaption>
+<figcaption>Galaxy evolution over 1,000 visualisation iterations. Inner particles orbit faster, causing the arms to wind up -- visible as increasing curvature from the first frame to the last.</figcaption>
 </figure>
 
 ---
@@ -121,9 +120,9 @@ After the run completes, open the **Latency Breakdown** tab:
 
 At this point, don't jump to conclusions, just note what the numbers say:
 
-- **L1C % Loads = 68.12%** — only about two-thirds of sampled loads resolve in L1 cache. The rest miss to L2C or beyond.
-- **L1C Avg Latency = 28.89 cycles** — this is high for L1C hits. A true L1C hit on Graviton is typically under 10 cycles. An average of ~29 cycles suggests many of these "L1C" accesses are actually stalling while lines are being refetched.
-- **L2C Avg Latency = 43.06 cycles** — the ~1% of loads reaching L2C pay over 40 cycles each.
+- **L1C % Loads = 68.12%** -- only about two-thirds of sampled loads resolve in L1 cache. The rest miss to L2C or beyond.
+- **L1C Avg Latency = 28.89 cycles** -- this is high for L1C hits. A true L1C hit on Graviton is typically under 10 cycles. An average of ~29 cycles indicates that prefetch requests are not completing before the data is demanded: the prefetcher is issuing fetches, but the large working set means lines are frequently evicted or not yet arrived before they are needed, so demand loads stall.
+- **L2C Avg Latency = 43.06 cycles** -- the ~1% of loads reaching L2C pay over 40 cycles each.
 
 Something is wrong with how this loop interacts with the memory hierarchy. A simple stride-1 loop over contiguous data should have a much higher L1C hit rate. Let's look at the source code to understand why.
 
@@ -154,11 +153,11 @@ In ATP:
 
 ### Open source code
 
-In the **Functions** table, locate `main`, then double-click it (or right-click → **View Source Code**). If prompted, click **Specify Root Directory** and point to your local source tree.
+In the **Functions** table, locate `main`, then double-click it (or right-click -> **View Source Code**). If prompted, click **Specify Root Directory** and point to your local source tree.
 
 Although ATP attributes the samples to `main`, the hot code is the inlined `update_positions` routine. This routine is the particle-update loop shown below: it advances `x`, `y`, and `z` using `vx`, `vy`, and `vz`.
 
-Navigate to the `update_positions` function body (lines 19–22). ATP shows periodic sample counts on each line:
+Navigate to the `update_positions` function body (lines 19-22). ATP shows periodic sample counts on each line:
 
 ```
 Line 19:    208  for (int i = 0; i < n; ++i) {
@@ -177,7 +176,7 @@ Total on the loop body: **5,061 periodic samples**.
 Two things stand out:
 
 1. **The sample count is high overall:** 5,061 samples on three simple multiply-add lines.
-2. **The distribution is heavily skewed:** line 20 (`p[i].x += ...`) accounts for 3,782 of the 5,061 samples. Lines 21 and 22 combined carry only about 1,071. Why would the `x` update be nearly 4× more expensive than `y` or `z`?
+2. **The distribution is heavily skewed:** line 20 (`p[i].x += ...`) accounts for 3,782 of the 5,061 samples. Lines 21 and 22 combined carry only about 1,071. Why would the `x` update be nearly 4x more expensive than `y` or `z`?
 
 ---
 
@@ -188,7 +187,7 @@ Now we have two pieces of evidence to connect:
 - **Memory Access** shows a 68% L1C hit rate and ~29-cycle average L1C latency on a loop that should be fully prefetchable.
 - **CPU Cycle Hotspots** shows the `x` update line carrying ~75% of all loop samples, far more than `y` or `z`.
 
-The `x` field is at **offset 0** in the `ParticleAoS` struct. Since each struct is exactly 64 bytes, one cache line, the access to `p[i].x` is the access that triggers the full cache line load for that particle. The `y` and `z` fields at offsets 4 and 8 are already in the loaded line, so they resolve quickly. Line 20 is paying the memory latency for the entire struct, not just for `x`.
+The `x` field is at **offset 0** in the `ParticleAoS` struct. Since each struct is exactly 64 bytes -- one cache line -- the access to `p[i].x` is the access that triggers the cache line fetch for that particle. The `y` and `z` fields at offsets 4 and 8 are already in the loaded line, so they resolve quickly. Line 20 is paying the memory latency for the entire struct, not just for `x`.
 
 This leads to the core question: **what is in that 64-byte cache line?**
 
@@ -198,13 +197,13 @@ ParticleAoS: [x y z vx vy vz | mass charge temp | pressure energy density | spin
              |<-------------------------------- 64 bytes loaded -------------------------------->|
 ```
 
-Each cache line fetch loads 64 bytes, but the update loop only uses the first 24 bytes (the six position and velocity floats). The remaining 40 bytes, `mass`, `charge`, `temperature`, `pressure`, `energy`, `density`, `spin_*`, and padding, are loaded, occupy cache space, and are evicted without ever being read. This is **37.5% cache line utilisation** (24 / 64).
+Each cache line fetch loads 64 bytes, but the update loop only uses the first 24 bytes (the six position and velocity floats). The remaining 40 bytes -- `mass`, `charge`, `temperature`, `pressure`, `energy`, `density`, `spin_*`, and padding -- are loaded, occupy cache space, and are evicted without ever being read. This is **37.5% cache line utilisation** (24 / 64).
 
 The consequences explain exactly what ATP reported:
 
-- **Low L1C hit rate (68%)**: with 40 wasted bytes per cache line, the effective working set is 64 MB (1,048,576 × 64 bytes). That's larger than Graviton3's 32 MB L3 cache, meaning every iteration must pull most data from DRAM. It also means L1C is constantly being filled with data that will never be used, evicting useful data prematurely.
-- **High L1C avg latency (29 cycles)**: the hardware prefetcher cannot keep up because it's fetching 2.67× more data than the loop actually needs (64 bytes per particle instead of 24).
-- **Skewed sample distribution**: line 20 dominates because it triggers the cache line load. Lines 21–22 benefit from the data already being resident.
+- **Low L1C hit rate (68%)**: with 40 wasted bytes per cache line, the effective working set is 64 MB (1,048,576 x 64 bytes). That exceeds Graviton3's 32 MB L3 cache, so every iteration must pull most data from DRAM. L1C is also continuously filled with data the loop will never use, evicting useful lines before they can be reused.
+- **High L1C avg latency (29 cycles)**: the hardware prefetcher is streaming 64 bytes per particle when the loop only needs 24 -- 2.67x the necessary memory traffic. This extra pressure means prefetches frequently do not complete before the data is demanded, causing stalls that inflate the average L1C latency well above the true L1C hit cost of under 10 cycles.
+- **Skewed sample distribution**: line 20 dominates because it triggers the cache line fetch for each struct. Lines 21 and 22 benefit from the data already being resident.
 
 The diagnosis is clear: **the data layout is the bottleneck**. The struct packs hot and cold fields together, wasting cache bandwidth and cache capacity on data the hot loop never reads.
 
@@ -234,8 +233,8 @@ std::vector<ParticleAoS> particles(N); // 64 MB working set
 
 ```cpp
 struct ParticlesSoA {
-    std::vector<float> x, y, z;       // used in hot loop, 3 × 4 MB
-    std::vector<float> vx, vy, vz;    // used in hot loop, 3 × 4 MB
+    std::vector<float> x, y, z;       // used in hot loop, 3 x 4 MB
+    std::vector<float> vx, vy, vz;    // used in hot loop, 3 x 4 MB
     std::vector<float> mass, charge, temperature; // separate, never loaded
     std::vector<float> pressure, energy, density; // separate, never loaded
     std::vector<float> spin_x, spin_y, spin_z;    // separate, never loaded
@@ -244,8 +243,8 @@ struct ParticlesSoA {
 
 Why this should fix the problem:
 
-1. **Only hot arrays are loaded.** The update loop touches `x`, `y`, `z`, `vx`, `vy`, `vz`, six contiguous arrays totalling 6 × 4 MB = **24 MB**, down from 64 MB.
-2. **100% cache line utilisation.** Each 64-byte line of `particles.x` contains 16 consecutive `x` values (16 × 4 bytes = 64 bytes), all consumed before eviction.
+1. **Only hot arrays are loaded.** The update loop touches `x`, `y`, `z`, `vx`, `vy`, `vz` -- six contiguous arrays totalling 6 x 4 MB = **24 MB**, down from 64 MB.
+2. **100% cache line utilisation.** Each 64-byte line of `particles.x` contains 16 consecutive `x` values (16 x 4 bytes = 64 bytes), all consumed before eviction.
 3. **No code changes beyond data access syntax.** The loop body changes from `p[i].x` to `p.x[i]`, and the algorithm, iteration count, and arithmetic are identical.
 
 Build and verify:
@@ -278,9 +277,9 @@ Run the Memory Access recipe again, this time with `soa_optimized` as the worklo
 
 Compare against the baseline:
 
-- **L1C % Loads: 68.12% → 99.98%** — virtually every load now resolves in L1C. The 24 MB working set fits in L3 and the hardware prefetcher can keep L1C continuously populated.
-- **L1C Avg Latency: 28.89 → 10.76 cycles** — with no eviction pressure from unused data, loads resolve at true L1C speed.
-- **L2C % Loads: 1.01% → ~0%** — L2C pressure is eliminated entirely.
+- **L1C % Loads: 68.12% -> 99.98%** -- virtually every load now resolves in L1C. The 24 MB working set fits within L3 and the hardware prefetcher can keep L1C continuously populated.
+- **L1C Avg Latency: 28.89 -> 10.76 cycles** -- with no eviction pressure from unused data, prefetches complete before data is demanded and loads resolve at true L1C speed.
+- **L2C % Loads: 1.01% -> ~0%** -- L2C pressure is eliminated entirely.
 
 The memory hierarchy is now behaving as expected for a simple stride-1 loop.
 
@@ -295,7 +294,7 @@ The memory hierarchy is now behaving as expected for a simple stride-1 loop.
 
 ## Re-map hotspot to source with CPU Cycle Hotspots to verify the fix
 
-Run **CPU Cycle Hotspots** with `soa_optimized`. Open **View Source Code** for `main` and navigate to lines 19–22:
+Run **CPU Cycle Hotspots** with `soa_optimized`. Open **View Source Code** for `main` and navigate to lines 19-22:
 
 ```
 Line 19:  210  for (int i = 0; i < n; ++i) {
@@ -304,7 +303,7 @@ Line 21:  807      p.y[i] += p.vy[i] * dt;
 Line 22:  927      p.z[i] += p.vz[i] * dt;
 ```
 
-Total on the loop body: **2,700 periodic samples**, down from 5,061, a **47% reduction**.
+Total on the loop body: **2,700 periodic samples**, down from 5,061 -- a **47% reduction**.
 
 <figure align="center">
 <img src="./assets/soa_source.png" alt="Source Code Inspector for soa_optimized showing fewer periodic samples"/>
@@ -312,7 +311,7 @@ Total on the loop body: **2,700 periodic samples**, down from 5,061, a **47% red
 </figure>
 
 
-Notice the second confirmation: **the distribution across lines is now even** (756, 807, 927). In the AoS profile, line 20 carried 75% of all samples because it triggered the per-struct cache line fetch. In SoA, each array is independent, and no single line bears the cost of loading unrelated data. The skew has disappeared, which is exactly what the diagnosis in Section 4 predicted.
+Notice the second confirmation: **the distribution across lines is now even** (756, 807, 927). In the AoS profile, line 20 carried 75% of all samples because it triggered the per-struct cache line fetch. In SoA, each array is independent and no single line bears the cost of loading unrelated data. The skew has disappeared, which is exactly what the diagnosis in Section 4 predicted.
 
 ---
 
@@ -323,11 +322,11 @@ Notice the second confirmation: **the distribution across lines is now even** (7
 | Metric | `aos_baseline` | `soa_optimized` | Change |
 |---|---:|---:|---|
 | **L1C % Loads** | 68.12% | 99.98% | +31.86 pp |
-| **L1C Avg Latency** | 28.89 cyc | 10.76 cyc | −63% |
+| **L1C Avg Latency** | 28.89 cyc | 10.76 cyc | -63% |
 | **L2C % Loads** | 1.01% | ~0% | Eliminated |
-| **Hot loop periodic samples** | 5,061 | 2,700 | −47% |
+| **Hot loop periodic samples** | 5,061 | 2,700 | -47% |
 | **Sample distribution (x / y / z)** | 3,782 / 268 / 803 | 756 / 807 / 927 | Skew eliminated |
-| **Working set** | 64 MB | 24 MB | −62.5% |
+| **Working set** | 64 MB | 24 MB | -62.5% |
 | **Cache line utilisation** | 37.5% | 100% | +62.5 pp |
 | **Algorithm change** | N/A | N/A | None |
 
@@ -343,7 +342,7 @@ The improvement came entirely from restructuring data, not from changing the alg
 ## Troubleshooting notes
 
 - Keep `-g` enabled so ATP can resolve source locations to line numbers.
-- Keep the problem size at `N = 1 << 20` and `iters = 200` for stable SPE sampling; smaller sizes may not produce enough samples for a reliable breakdown.
+- Keep the profiled problem size at `N = 1 << 20` and `iters = 200` for stable SPE sampling; the longer `1,000`-iteration run is only used when `--visualize` is enabled.
 - Compare like-for-like runs: same Graviton instance, same CPU frequency policy, no other heavy workloads running concurrently.
 - If `update_positions` does not appear as a separate function in ATP (shows only `main`), this is expected because the compiler inlines static functions. Click `main` and navigate to the `update_positions` body in the source view.
 - If ATP does not resolve source lines at all (shows `??`), ensure you point the source root to the `tutorial_2/src` directory and verify debug symbols are present (`file aos_baseline` should show `with debug_info`).

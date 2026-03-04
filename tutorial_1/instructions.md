@@ -1,4 +1,4 @@
-# Tutorial 1: Top-Down Performance Analysis Methodology
+# Tutorial 1: Top-Down Performance Analysis with Arm-Total-Performance
 
 Performance problems are rarely obvious from source code alone. A loop can look perfectly reasonable yet run far slower than expected, and without measurement it is easy to optimise the wrong thing. This tutorial shows you how to use **Arm Total Performance (ATP)** on **AWS Graviton** to identify bottlenecks systematically and verify that each fix actually works.
 
@@ -53,10 +53,10 @@ A Top-Down analysis works by moving from broad categories to more specific ones.
 
 ```
 Topdown
-├── Frontend Bound  → I-cache MPKI, ITLB walks, branch MPKI
-├── Backend Bound   → Memory Bound (L1 / L2 / LLC / DRAM) or Core Bound
-├── Bad Speculation → branch misprediction ratio
-└── Retiring        → instruction mix (scalar vs SIMD, integer vs FP)
++-- Frontend Bound  -> I-cache MPKI, ITLB walks, branch MPKI
++-- Backend Bound   -> Memory Bound (L1 / L2 / LLC / DRAM) or Core Bound
++-- Bad Speculation -> branch misprediction ratio
++-- Retiring        -> instruction mix (scalar vs SIMD, integer vs FP)
 ```
 
 For example, if **Backend Bound** is the largest bucket, the next question is whether those slots are being lost to the memory system or to pressure on the execution units. If the problem is memory-related, the next level helps you see whether the delays are mainly coming from L1, L2, LLC, or DRAM. Each step makes the diagnosis more specific and helps you choose a sensible optimisation direction.
@@ -175,7 +175,7 @@ The animation below makes this concrete on a small matrix. Watch the memory stri
 
 This is why the **L1D miss ratio is so high**. The inner loop touches data that is far apart in memory, so it gets very little reuse at the top of the hierarchy. Many of those misses are recovered in L2 or LLC, but some still continue to DRAM.
 
-The full `B` matrix is 256 MB, far exceeding the ~32 MB LLC, so the cache hierarchy cannot retain the needed data effectively as the loop walks through `B`.
+The full `B` matrix is 32 MB (K x N x 4 bytes = 1024 x 8192 x 4), which exceeds the ~32 MB LLC on Graviton3, so the cache hierarchy cannot retain the needed data effectively as the loop walks through `B`.
 
 **Complete diagnosis: Backend Bound -> Memory Bound -> poor cache locality from strided B access, with severe L1D misses and some spillover to deeper cache levels and DRAM.**
 
@@ -322,7 +322,7 @@ Run the Topdown recipe on `matmul_neon`. Since the goal of this change was to in
 <img src="assets/neon_retiring.png" width="350" alt="Operation mix for NEON matmul"/>
 </p>
 
-The result confirms the optimisation worked. Scalar floating-point dropped from 14% to 0%, and **Advanced SIMD** jumped from 0% to 31%. Every multiply-add is now a NEON instruction processing 4 floats at once. Each iteration of the inner k-loop performs 4 vector FMAs (16 FLOPs) from roughly 5 memory operations, a much better compute-to-memory ratio than the scalar version.
+The result confirms the optimisation worked. Scalar floating-point dropped from 14% to 0%, and **Advanced SIMD** jumped from 0% to 31%. Every multiply-add is now a NEON instruction processing 4 floats at once. Each iteration of the inner k-loop performs 4 vector FMAs (32 FLOPs) from roughly 5 memory operations, a much better compute-to-memory ratio than the scalar version.
 
 ---
 

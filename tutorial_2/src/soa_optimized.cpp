@@ -83,11 +83,20 @@ static void init_galaxy(ParticlesSoA& p, int n) {
 }
 
 int main(int argc, char* argv[]) {
-    const int   N     = 1 << 20; // 1,048,576 particles — same as AoS baseline
-    const int   iters = 200;
+    const int   N              = 1 << 20; // 1,048,576 particles — same as AoS baseline
+    const int   default_iters  = 200;
+    const int   vis_iters      = 1000;
     const float dt    = 0.005f;
 
-    const bool do_vis = (argc > 1 && strcmp(argv[1], "--visualize") == 0);
+    bool do_vis = false;
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--visualize") == 0) {
+            do_vis = true;
+            break;
+        }
+    }
+
+    const int iters = do_vis ? vis_iters : default_iters;
 
     const int vis_stride   = 16;
     const int vis_interval = 10;
