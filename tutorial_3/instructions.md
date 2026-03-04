@@ -44,6 +44,8 @@ Once upon a time there was a man who had a great deal of money...
 [200 tokens, 3.2 tok/s]
 ```
 
+> **About GPT-2:** GPT-2 ([Radford et al., 2019](https://cdn.openai.com/better-language-models/language_models_are_unsupervised_multitask_learners.pdf)) was one of the most influential early language models, demonstrating that large-scale unsupervised training could produce surprisingly coherent text. By modern standards it is small, so do not expect ChatGPT-quality output.
+
 A **token** is a chunk of text processed by the model, often a whole word, part of a word, or punctuation. `tok/s` means **tokens per second**, which is the standard throughput metric for text generation: higher `tok/s` means the model is generating text faster.
 
 Internally, GPT-2 Medium is a large numerical model with 345 million stored floating-point weights. These weights are the learned numerical parameters that determine how the model transforms one sequence of tokens into the next. Generating each new token requires running those weights through 24 layers of repeated arithmetic. Do not worry if you do not understand LLM internals; for this tutorial, the important point is that this is a compute-heavy C++ workload with several functions involved in the generation path. The next step is to download the model data and convert it into the binary format expected by the C++ program, then build and run the baseline workload.
