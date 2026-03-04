@@ -1,4 +1,4 @@
-# Tutorial 2: Optimising a Memory-Bound Workload with ATP — Memory Access + CPU Cycle Hotspots
+# Tutorial 2: Optimising a Memory-Bound Workload with ATP - Memory Access + CPU Cycle Hotspots
 
 Memory bottlenecks are common on modern CPUs and often hard to spot without the right tools. A loop with simple arithmetic, no branching, and no data dependencies can still run far below its theoretical peak, and the cause is frequently a data layout problem rather than anything in the algorithm itself.
 
@@ -22,8 +22,8 @@ In this tutorial, you will use **Arm Total Performance (ATP)** to investigate ex
 - **Cache line**: the minimum unit of data transferred between memory levels (64 bytes on Arm).
 - **SPE**: Arm Statistical Profiling Extension, the hardware sampling mechanism used by the Memory Access recipe.
 - **Periodic Samples**: ATP's sampled execution counts shown in CPU Cycle Hotspots tables.
-- **L1C**: Level 1 data cache — the fastest and smallest cache, closest to the CPU core.
-- **L2C**: Level 2 cache — larger and slower than L1C.
+- **L1C**: Level 1 data cache - the fastest and smallest cache, closest to the CPU core.
+- **L2C**: Level 2 cache - larger and slower than L1C.
 
 ---
 
@@ -37,7 +37,7 @@ p[i].y += p[i].vy * dt;
 p[i].z += p[i].vz * dt;
 ```
 
-This runs over **1,048,576 particles** for **200 iterations**. The algorithm is simple — three multiply-adds per particle per iteration. There is no complex control flow, no branching, no dependencies between particles. On paper this loop should be entirely memory-bound and highly prefetcher-friendly.
+This runs over **1,048,576 particles** for **200 iterations**. The algorithm is simple: three multiply-adds per particle per iteration. There is no complex control flow, no branching, no dependencies between particles. On paper this loop should be entirely memory-bound and highly prefetcher-friendly.
 
 The particle struct looks like this:
 
@@ -133,6 +133,8 @@ In ATP:
 ### Open source code
 
 In the **Functions** table, locate `main`, then double-click it (or right-click → **View Source Code**). If prompted, click **Specify Root Directory** and point to your local source tree.
+
+Although ATP attributes the samples to `main`, the hot code is the inlined `update_positions` routine. This routine is the particle-update loop shown below: it advances `x`, `y`, and `z` using `vx`, `vy`, and `vz`.
 
 Navigate to the `update_positions` function body (lines 19–22). ATP shows periodic sample counts on each line:
 
