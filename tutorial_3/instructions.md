@@ -81,6 +81,8 @@ When the program finishes generating, it prints a final line like this showing t
 [50 tokens, 17.2837 tok/s]
 ```
 
+<img src="assets/gpt_textgen.gif" width="850" alt="Terminal recording of gpt2 generating text and printing its throughput in tokens per second"/>
+
 ---
 
 ## Profile the Baseline: CPU Cycle Hotspots
@@ -158,17 +160,38 @@ The inner loop performs one scalar multiply-accumulate per iteration, surrounded
 
 ## Fix and Re-Profile: KleidiAI SVE Microkernel
 
-ATP has identified the problem precisely: the dominant function is a scalar floating-point loop running on a processor with idle SVE vector units. The appropriate response is to replace that loop with an highly optimised implementation that uses vector units such as SVE.
+ATP has identified the problem: the dominant function is a scalar loop running on a processor with idle SVE vector units. The fix is to replace it with a vectorised implementation from [KleidiAI](https://github.com/ARM-software/kleidiai), Arm's open-source library of hand-tuned AI microkernels.
 
-To do this we can use KleidiAI is Arm's open-source library of AI computation microkernels, each hand-tuned to a specific CPU microarchitecture. The kernel used in `gpt2_kai_sve` - `kai_matmul_clamp_f32_f32_f32p4vlx1b_6x4vl_sve_mla` - is designed for Graviton. It processes a tile of 6 output rows and 4 SVE vector lengths of columns per inner loop iteration using fused multiply-accumulate (`FMLA`) instructions, keeping the SVE register file fully utilised throughout.
+The change has two parts. First, weight matrices are repacked once at startup into a tiled memory layout the microkernel can load efficiently - this cost is not included in the reported tok/s. Second, the scalar loop body is replaced by calls to `ukernel.run_matmul`:
 
-The change to the code involves two steps.
+```cpp
+static void matmul(float* out, const float* x, const uint8_t* rhs_packed,
+                   int n_in, int n_out)
+{
+    const size_t m = 1, k = (size_t)n_in;
+    const size_t lhs_stride = k * sizeof(float);
+    const size_t dst_stride_row = (size_t)n_out * sizeof(float);
+    const size_t dst_stride_col = sizeof(float);
+    const size_t n_step = ukernel.get_n_step();
 
-**Weight packing (once, at startup).** The microkernel expects the weight matrix in a specific tiled memory layout that allows it to load data efficiently. `gpt2_kai_sve` calls `pack_all_weights` before the first token is generated, which rearranges every projection matrix into this layout. This cost is paid once and is not included in the reported tok/s.
+    const size_t n_blocks = ((size_t)n_out + n_step - 1) / n_step;
 
-**Microkernel dispatch (every matmul call).** The scalar loop body is replaced by calls to `ukernel.run_matmul`, the KleidiAI kernel entry point. The function signature changes - weights are now passed as packed bytes rather than raw floats - but the inputs and outputs of every layer are identical.
+    for (size_t b = 0; b < n_blocks; b++) {
+        const size_t n_start = b * n_step;
+        const size_t rhs_offset = ukernel.get_rhs_packed_offset(n_start, k);
 
-The algorithm is unchanged. The model weights are unchanged. The generated text is the same. The only difference is what instructions the CPU executes to perform the multiplications.
+        ukernel.run_matmul(
+            m, n_step, k,
+            x, lhs_stride,
+            rhs_packed + rhs_offset,
+            out + n_start, dst_stride_row, dst_stride_col,
+            -FLT_MAX, FLT_MAX
+        );
+    }
+}
+```
+
+The algorithm, model weights, and generated text are all unchanged. The only difference is what instructions the CPU executes. See the [KleidiAI repository](https://github.com/ARM-software/kleidiai) for details on the available kernels and their target microarchitectures.
 
 ### Step 1: Re-profile with Instruction Mix
 
@@ -178,37 +201,17 @@ In ATP, select **Recipes -> Instruction Mix**, set the workload to `gpt2_kai_sve
 
 ### Step 2: Read the new Instruction Mix breakdown
 
-<img src="assets/gpt2_kai_sve_instruction_mix.png" width="850" alt="Instruction Mix for gpt2_kai_sve: SVE instructions now account for the largest share of retired instructions and Scalar FP has dropped to near zero"/>
+<p align="center">
+<img src="assets/gpt2_kai_sve_instruction_mix.png" width="500" alt="Instruction Mix for gpt2_kai_sve: SVE instructions now account for the largest share of retired instructions at roughly 53%, with Floating Point Operations near zero"/>
+</p>
 
-| Instruction Category | `gpt2` | `gpt2_kai_sve` | Change |
-|---|---:|---:|---|
-| Loads | [your value] | [your value] | |
-| Stores | [your value] | [your value] | |
-| Integer | [your value] | [your value] | |
-| Scalar FP | [your value] | [your value] | **large decrease** |
-| Advanced SIMD (NEON) | [your value] | [your value] | |
-| SVE | 0% | [your value] | **large increase** |
-| Branch | [your value] | [your value] | |
+The chart has changed dramatically. **SVE Operations** are now the single largest category at roughly 53% of all retired instructions - up from 0% in the baseline. **Floating Point Operations** have collapsed to near zero. This is the inversion the diagnosis predicted: the processor is now spending the majority of its arithmetic work in 256-bit vector instructions rather than scalar ones.
 
-The Scalar FP and SVE rows have inverted. The gap that the baseline profile revealed - SVE at zero despite a compute-heavy workload - has been closed. The Graviton3 SVE units are now active for the dominant function.
+The **Load Operations** bar (~34%) is higher than in the baseline. This is a direct side-effect of the packed weight layout: the microkernel loads a wide tile of weight data per inner-loop iteration, so loads are a larger fraction of the total instruction stream even though the absolute number of loads has gone down.
 
-The modest increase in the Load percentage is a side-effect of the packed weight layout: the microkernel loads wider rows of weight data per inner loop iteration compared to the scalar row-by-row access, so a larger fraction of retired instructions are loads.
+**Integer Operations** (~18%) and **Branch** (~7%) have both decreased relative to the baseline. The scalar loop generated a large number of index and counter instructions for every element; the tiled microkernel amortises that overhead across a whole tile of outputs, so far fewer integer and branch instructions are needed per unit of useful work.
 
-### Step 3: Re-profile with CPU Cycle Hotspots
-
-A shift in the instruction mix should also be visible in how the cycle distribution across functions changes. Run CPU Cycle Hotspots one more time with `gpt2_kai_sve`: select **Recipes -> CPU Cycle Hotspots**, set the same workload and arguments, and click **Run Recipe**.
-
-<img src="assets/gpt2_kai_sve_functions_table.png" width="850" alt="Functions table for gpt2_kai_sve: the hotspot has moved from the scalar matmul wrapper into the KleidiAI microkernel, and layernorm and attention now occupy a larger relative share"/>
-
-| Function | % Cycles (`gpt2`) | % Cycles (`gpt2_kai_sve`) |
-|---|---:|---:|
-| `matmul` (scalar wrapper) | ~85% | small |
-| `kai_run_matmul_...` (SVE kernel) | - | [your value, dominant] |
-| `layernorm` | ~6% | [your value, larger relative share] |
-| Attention loops | ~5% | [your value, larger relative share] |
-| Other | ~4% | [your value] |
-
-The dominant function has changed from the hand-written scalar loop to the KleidiAI microkernel - exactly what a successful library substitution looks like in ATP. The `layernorm` and attention loop functions appear to occupy a larger relative share than before. They have not become slower; the matmul has become faster, so those functions now represent a larger fraction of what remains. This is a useful signal: the bottleneck has shifted, and if further improvement is needed, ATP is already pointing at the next target.
+The gap that the baseline profile revealed - SVE at zero on a compute-heavy workload - has been closed.
 
 ---
 
@@ -218,31 +221,20 @@ Compare the tok/s figures from both runs:
 
 | Binary | Throughput | SVE % | Scalar FP % |
 |---|---:|---:|---:|
-| `gpt2` | [X tok/s] | 0% | [your value] |
-| `gpt2_kai_sve` | [Y tok/s] | [your value] | [your value] |
-| Improvement | [Y/X ×] | - | - |
+| `gpt2` | 3.4 tok/s | 0% | ~0% |
+| `gpt2_kai_sve` | 18.0 tok/s | ~54% | ~0% |
+| Improvement | **5.3×** | - | - |
 
 The throughput increase is the real-world consequence of the instruction-level change ATP measured. No algorithm changed, no data was restructured, no compiler flags were added. The improvement comes entirely from replacing scalar FP instructions with SVE FP instructions in the one function that dominates the runtime.
+
+<p align="center">
+<img src="assets/gpt_kai_sve_textgen.gif" width="850" alt="Terminal recording of gpt2_kai_sve generating text at higher throughput after the SVE optimisation"/>
+</p>
 
 ---
 
 ## Key Takeaways
 
-**Follow the profile-diagnose-fix-re-profile loop.** The pattern in this tutorial is the same one you will use on any workload: profile to find the hotspot, use Instruction Mix to understand what the hotspot is executing, apply a targeted fix, and re-profile to confirm the change worked. ATP provided the diagnostic at each step: CPU Cycle Hotspots answered "where?", and Instruction Mix answered "how?".
-
-**Backend utilisation is visible in the instruction mix.** Knowing that `matmul` is the hotspot is not enough. The Instruction Mix showed that the hotspot was executing scalar FP instructions on a processor with idle SVE vector units - that combination is a concrete, actionable diagnosis rather than a guess.
-
-**SVE = 0% after adopting an SVE library means something is wrong.** If you integrate a library that claims to use SVE and the Instruction Mix still shows SVE = 0% afterwards, something has gone wrong - the wrong build was linked, a scalar fallback path is being taken, or the inputs do not meet the kernel's requirements. ATP makes that situation immediately visible without needing to inspect assembly or read library documentation.
-
-**Always re-profile after each change.** The re-profile confirmed that the instruction mix shift translated into real throughput improvement. The `layernorm` and attention functions now occupy a larger relative share of the profile - not because they got slower, but because the bottleneck moved. If further improvement is needed, ATP is already pointing at the next target.
-
----
-
-## Troubleshooting
-
-- `gpt2_kai_sve` only builds on AArch64 hosts. CMake skips the target silently on other architectures; check the CMake output if the binary is missing.
-- If Instruction Mix shows SVE = 0% for `gpt2_kai_sve`, verify the binary targets `aarch64` and the instance is Graviton3. SVE is not available on Graviton2, which provides NEON only.
-- Keep `-g` in the build flags (already set in `CMakeLists.txt`) so ATP can resolve function names and source lines.
-- Use the same `-n` token count for both profiled runs to ensure a fair comparison.
-- If `matmul` does not appear as a separate row in the Functions table (only `forward` is visible), the compiler has inlined it. Click `forward` and use the Source Code view; the sample counts on the call-site lines reflect the matmul cost.
-- The weight packing step in `gpt2_kai_sve` runs before generation begins. In the flame graph it appears as a short bar at the very start of execution. ATP's time-range selector can isolate the generation phase if packing is visible in the profile.
+- **Profile first, then fix.** CPU Cycle Hotspots answers "where?"; Instruction Mix answers "how?". Together they give a concrete diagnosis rather than a guess.
+- **Instruction mix reveals idle hardware.** SVE = 0% on a compute-heavy workload means the processor's vector units are unused - a clear, actionable signal.
+- **Always re-profile after a change.** Confirm the instruction mix shifted as expected and that throughput improved. If SVE still reads 0% after adopting an SVE library, something went wrong in the build or dispatch path.

@@ -157,14 +157,14 @@ static void pack_weight_rhs(uint8_t* packed, const float* W, const float* bias,
 static void matmul(float* out, const float* x, const uint8_t* rhs_packed,
                    int n_in, int n_out)
 {
+    // Matrix dimensions: out is 1×n_out, x is 1×n_in, rhs is n_in×n_out (packed)
     const size_t m = 1, k = (size_t)n_in;
     const size_t lhs_stride = k * sizeof(float);
     const size_t dst_stride_row = (size_t)n_out * sizeof(float);
     const size_t dst_stride_col = sizeof(float);
     const size_t n_step = ukernel.get_n_step();
-    // Ceiling division: the last partial block is still run at full n_step width.
-    // The caller must ensure `out` has at least ceil(n_out/n_step)*n_step elements
-    // of writable space (State::logits is allocated with this padding).
+
+    // Process output columns in blocks of n_step (ukernel tile size)
     const size_t n_blocks = ((size_t)n_out + n_step - 1) / n_step;
 
     for (size_t b = 0; b < n_blocks; b++) {
