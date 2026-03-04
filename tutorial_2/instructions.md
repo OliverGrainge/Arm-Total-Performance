@@ -14,7 +14,7 @@ In this tutorial, you will use **Arm Total Performance (ATP)** to investigate ex
 - GCC 9+ or Clang 14+
 - CMake 3.16+
 - ATP installed and configured
-- Python 3 with `numpy`, `matplotlib`, and `Pillow` (for visualization only -- `pip install numpy matplotlib Pillow`)
+- Python 3 with `numpy`, `matplotlib`, and `Pillow` (for visualisation only -- `pip install numpy matplotlib Pillow`)
 
 ## Terms used in this tutorial
 
@@ -201,7 +201,7 @@ Each cache line fetch loads 64 bytes, but the update loop only uses the first 24
 
 The consequences explain exactly what ATP reported:
 
-- **Low L1C hit rate (68%)**: with 40 wasted bytes per cache line, the effective working set is 64 MB (1,048,576 x 64 bytes). That exceeds Graviton3's 32 MB L3 cache, so every iteration must pull most data from DRAM. L1C is also continuously filled with data the loop will never use, evicting useful lines before they can be reused.
+- **Low L1C hit rate (68%)**: with 40 wasted bytes per cache line, the effective working set is 64 MB (1,048,576 x 64 bytes). On Graviton2 this exceeds the 32 MB LLC, so every iteration must pull most data from DRAM. Even on Graviton3 with its larger 64 MB LLC, the working set fills the cache entirely, leaving no room for other data and causing continuous eviction pressure. L1C is also continuously filled with data the loop will never use, evicting useful lines before they can be reused.
 - **High L1C avg latency (29 cycles)**: the hardware prefetcher is streaming 64 bytes per particle when the loop only needs 24 -- 2.67x the necessary memory traffic. This extra pressure means prefetches frequently do not complete before the data is demanded, causing stalls that inflate the average L1C latency well above the true L1C hit cost of under 10 cycles.
 - **Skewed sample distribution**: line 20 dominates because it triggers the cache line fetch for each struct. Lines 21 and 22 benefit from the data already being resident.
 
@@ -277,7 +277,7 @@ Run the Memory Access recipe again, this time with `soa_optimized` as the worklo
 
 Compare against the baseline:
 
-- **L1C % Loads: 68.12% -> 99.98%** -- virtually every load now resolves in L1C. The 24 MB working set fits within L3 and the hardware prefetcher can keep L1C continuously populated.
+- **L1C % Loads: 68.12% -> 99.98%** -- virtually every load now resolves in L1C. The 24 MB working set fits comfortably within the LLC, and the hardware prefetcher can keep L1C continuously populated.
 - **L1C Avg Latency: 28.89 -> 10.76 cycles** -- with no eviction pressure from unused data, prefetches complete before data is demanded and loads resolve at true L1C speed.
 - **L2C % Loads: 1.01% -> ~0%** -- L2C pressure is eliminated entirely.
 
@@ -311,7 +311,7 @@ Total on the loop body: **2,700 periodic samples**, down from 5,061 -- a **47% r
 </figure>
 
 
-Notice the second confirmation: **the distribution across lines is now even** (756, 807, 927). In the AoS profile, line 20 carried 75% of all samples because it triggered the per-struct cache line fetch. In SoA, each array is independent and no single line bears the cost of loading unrelated data. The skew has disappeared, which is exactly what the diagnosis in Section 4 predicted.
+Notice the second confirmation: **the distribution across lines is now even** (756, 807, 927). In the AoS profile, line 20 carried 75% of all samples because it triggered the per-struct cache line fetch. In SoA, each array is independent and no single line bears the cost of loading unrelated data. The skew has disappeared, which is exactly what the diagnosis predicted.
 
 ---
 
@@ -334,7 +334,7 @@ Notice the second confirmation: **the distribution across lines is now even** (7
 
 The improvement came entirely from restructuring data, not from changing the algorithm, adding compiler hints, or rewriting the loop. ATP's two recipes provided the evidence at each step: Memory Access revealed the cache problem, CPU Cycle Hotspots pinpointed the source lines and confirmed the skew pattern that pointed to per-struct cache line fetches, and both recipes verified the fix after the change.
 
-> **Note on Graviton vs other hardware.** The screenshots were taken on a development machine with a large L3 cache. On Graviton3 (32 MB L3), the 64 MB AoS working set exceeds L3, so the AoS profile will additionally show significant LLC and DRAM traffic, and the improvement from SoA will be even more pronounced.
+> **Note on Graviton hardware variants.** The screenshots were taken on a development machine with a large L3 cache. On Graviton2 (32 MB LLC), the 64 MB AoS working set far exceeds L3, so the AoS profile will show significant LLC and DRAM traffic, and the improvement from SoA will be even more pronounced. On Graviton3 (64 MB LLC), the AoS working set nominally fits but leaves no headroom, so eviction pressure and bandwidth waste still cause poor cache behaviour.
 
 
 ---

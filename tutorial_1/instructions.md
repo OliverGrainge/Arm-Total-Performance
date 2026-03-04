@@ -55,7 +55,7 @@ A Top-Down analysis works by moving from broad categories to more specific ones.
 Topdown
 +-- Frontend Bound  -> I-cache MPKI, ITLB walks, branch MPKI
 +-- Backend Bound   -> Memory Bound (L1 / L2 / LLC / DRAM) or Core Bound
-+-- Bad Speculation -> branch misprediction ratio
++-- Bad Speculation  -> branch misprediction ratio
 +-- Retiring        -> instruction mix (scalar vs SIMD, integer vs FP)
 ```
 
@@ -175,9 +175,9 @@ The animation below makes this concrete on a small matrix. Watch the memory stri
 
 This is why the **L1D miss ratio is so high**. The inner loop touches data that is far apart in memory, so it gets very little reuse at the top of the hierarchy. Many of those misses are recovered in L2 or LLC, but some still continue to DRAM.
 
-The full `B` matrix is 32 MB (K x N x 4 bytes = 1024 x 8192 x 4), which exceeds the ~32 MB LLC on Graviton3, so the cache hierarchy cannot retain the needed data effectively as the loop walks through `B`.
+The full `B` matrix is 32 MB (K x N x 4 bytes = 1024 x 8192 x 4), which is large relative to the LLC on Graviton processors, so the cache hierarchy cannot retain the needed data effectively as the loop walks through `B`.
 
-**Complete diagnosis: Backend Bound -> Memory Bound -> poor cache locality from strided B access, with severe L1D misses and some spillover to deeper cache levels and DRAM.**
+**Complete diagnosis: Backend Bound -> Memory Bound -> poor cache locality from strided B access, with severe L1D misses and spillover to deeper cache levels and DRAM.**
 
 Now that the bottleneck is clear, the next step is to change the loop structure so the working set stays in cache.
 
@@ -225,7 +225,7 @@ Run the Topdown recipe again, this time on `matmul_tiled`. Always re-profile aft
 <img src="assets/tiled_topdown.png" width="850" alt="ATP Topdown summary for tiled matmul"/>
 </p>
 
-Comparing the Summary view with the naive run, the improvement is dramatic. **Retiring** jumped from ~8% to 66.5%, meaning the pipeline is now doing useful work most of the time. **Backend Bound** dropped from ~78% to 19%, showing that memory stalls have been largely eliminated.
+Comparing the Summary view with the naive run, the improvement is dramatic. **Retiring** jumped from ~10% to 66.5%, meaning the pipeline is now doing useful work most of the time. **Backend Bound** dropped from ~80% to 19%, showing that memory stalls have been largely eliminated.
 
 To confirm that this shift really comes from better locality, check cache effectiveness in the Functions tab:
 
@@ -259,7 +259,7 @@ The operation mix reveals the next problem. Loads account for 28.3% of operation
 
 The next optimisation is therefore to vectorise the arithmetic. The NEON kernel in `src/matmul_neon.cpp` makes two important changes. First, it processes `C` in `4x4` blocks held in NEON registers, so each `vfmaq_n_f32` updates four output values at once. Second, it packs each `B` tile into a contiguous buffer so the inner loop can read `B` sequentially instead of with a large stride.
 
-The tile size is also reduced to `TILE=64`. Three `64x64` tiles total 48 KB, which fits in L1d (64 KB). The code below shows both ideas: `pack_B_tile(...)` creates the contiguous `B` buffer, and the inner loops update a `4x4` block of `C` using NEON registers:
+The tile size is also reduced to `TILE=64`. Three `64x64` tiles total 48 KB, which fits in L1D (64 KB). The code below shows both ideas: `pack_B_tile(...)` creates the contiguous `B` buffer, and the inner loops update a `4x4` block of `C` using NEON registers:
 
 ```cpp
 constexpr int TILE = 64;
@@ -338,7 +338,7 @@ Run all three back-to-back and compare your ATP profiles:
 
 Across the three optimisation steps, the ATP Topdown view tells a consistent story of progress. For the naive kernel, Backend Bound dominates, the cache metrics show poor locality, and SIMD utilisation is 0%. After tiling, Retiring becomes dominant and L1D miss activity drops sharply, but SIMD remains at 0%. After adding NEON register blocking, SIMD utilisation rises substantially and Backend Bound stays low.
 
-The diagnostic workflow follows the same pattern at each step. For the naive kernel, ATP pointed to Backend Bound, which narrowed to Memory Bound and then LLC misses caused by strided B access. The fix was 2D tiling to keep tiles in L2. For the tiled kernel, ATP showed Retiring was dominant but SIMD was 0%, pointing to scalar arithmetic as the bottleneck. The fix was a NEON 4x4 micro-kernel. After the NEON version, SIMD utilisation is at 31.6% and Backend Bound is minimal, indicating the workload is now compute-efficient.
+The diagnostic workflow follows the same pattern at each step. For the naive kernel, ATP pointed to Backend Bound, which narrowed to Memory Bound and then severe L1D misses caused by strided B access. The fix was 2D tiling to keep tiles in cache. For the tiled kernel, ATP showed Retiring was dominant but SIMD was 0%, pointing to scalar arithmetic as the bottleneck. The fix was a NEON 4x4 micro-kernel. After the NEON version, SIMD utilisation is at 31.6% and Backend Bound is minimal, indicating the workload is now compute-efficient.
 
 The key is that **ATP told us what to fix at each step**. The Topdown Summary pointed to the bottleneck category, and narrowing the diagnosis with cache effectiveness or the operation mix told us exactly what to change.
 
@@ -348,7 +348,7 @@ The key is that **ATP told us what to fix at each step**. The Topdown Summary po
 
 **Follow the Top-Down workflow.** The pattern is: Summary view -> dominant bucket -> narrow the diagnosis -> connect to code -> fix -> re-profile. This is the loop you will use in every tutorial in this course.
 
-**Backend Bound combined with persistent miss activity at deeper cache levels** means your working set does not fit in cache well enough. The fix is to tile your loops or restructure your data access so that the inner computation operates on smaller blocks.
+**Backend Bound combined with high L1D miss rates and spillover to deeper cache levels** means your working set does not fit in cache well enough. The fix is to tile your loops or restructure your data access so that the inner computation operates on smaller blocks.
 
 **High Retiring with 0% SIMD** means the pipeline is busy but processing only one element at a time. Vectorising with NEON intrinsics can deliver up to 4x throughput improvement for 32-bit float arithmetic.
 

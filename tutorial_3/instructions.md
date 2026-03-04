@@ -30,7 +30,7 @@ ATP's **Instruction Mix** recipe counts every retired instruction and groups it 
 For a compute-heavy kernel, the balance between Scalar FP and SVE is a strong diagnostic signal. If the hot numerical loop is mostly scalar on a Graviton3 system, the processor's wider vector hardware is not being used well.
 
 
-> **Note on measurement bias:** Because `matmul` accounts for ~85% of cycles in this workload, its instruction behaviour dominates the whole-program Instruction Mix ATP reports. The whole-program view is, in practice, a close proxy for what `matmul` is doing.
+> **Note on measurement bias:** Because `matmul` accounts for ~84% of cycles in this workload, its instruction behaviour dominates the whole-program Instruction Mix ATP reports. The whole-program view is, in practice, a close proxy for what `matmul` is doing.
 
 ---
 
@@ -112,7 +112,7 @@ The flame graph shows that most of the program's time is spent in `forward`, and
 In the CPU Hotspots run, switch to the **Functions** tab. Here, ATP lists every sampled function alongside its percentage of total cycles that it occupies:
 
 <p align="center">
-<img src="assets/gpt2_functions_table.png" width="850" alt="Functions table for gpt2 showing matmul at roughly 83% of cycles with all other functions combined as a small fraction"/>
+<img src="assets/gpt2_functions_table.png" width="850" alt="Functions table for gpt2 showing matmul at roughly 84% of cycles with all other functions combined as a small fraction"/>
 </p>
 
 The profile is clear: `matmul` accounts for about 84% of runtime. That means improving `matmul` should translate directly into higher throughput, but only up to a point: the other ~16% of the program still remains. Even if `matmul` were made infinitely fast, the total speedup would still be capped at about 6.25x.
@@ -164,7 +164,7 @@ static void matmul(float *out, const float *x, const float *W, const float *b,
 The inner loop performs one scalar multiply-accumulate per iteration, surrounded by scalar loads and index arithmetic, which is exactly the execution pattern the Instruction Mix chart is showing.
 
 
-**Complete diagnosis:** the hot `matmul` function is executing as a scalar loop with scalar loads, index logic, and scalar floating-point operations. `SVE = 0%`, so Graviton's vector units are idle for the dominant operation.
+**Complete diagnosis:** the hot `matmul` function is executing as a scalar loop with scalar loads, index logic, and scalar floating-point operations. `SVE = 0%`, so Graviton3's vector units are idle for the dominant operation.
 
 ---
 
@@ -172,7 +172,7 @@ The inner loop performs one scalar multiply-accumulate per iteration, surrounded
 
 ATP has identified the problem: the dominant function is a scalar loop running on a processor with idle SVE vector units. The fix is to replace it with a vectorised implementation from [KleidiAI](https://github.com/ARM-software/kleidiai), Arm's open-source library of hand-tuned AI microkernels.
 
-The change has two parts. First, weight matrices are repacked once at startup into a tiled memory layout the microkernel can load efficiently - this cost is not included in the reported tok/s. Second, the scalar loop body is replaced by calls to `ukernel.run_matmul`:
+The change has two parts. First, weight matrices are repacked once at startup into a tiled memory layout the microkernel can load efficiently - this cost is not included in the reported tok/s. Second, the scalar loop body is replaced by calls to `ukernel.run_matmul`. The bias addition (`b ? b[i] : 0.f`) is folded into the surrounding code so the microkernel handles only the matrix multiply; the final result is identical.
 
 ```cpp
 static void matmul(float* out, const float* x, const uint8_t* rhs_packed,
@@ -203,6 +203,22 @@ static void matmul(float* out, const float* x, const uint8_t* rhs_packed,
 
 The algorithm, model weights, and generated text are all unchanged. The only difference is what instructions the CPU executes. See the [KleidiAI repository](https://github.com/ARM-software/kleidiai) for details on the available kernels and their target microarchitectures.
 
+### Build the optimised binary
+
+The CMake configuration builds both the baseline and the KleidiAI-optimised binary. If you followed the build steps earlier, `gpt2_kai_sve` should already be in your `build/` directory. If not, rebuild:
+
+```bash
+cmake -S . -B build
+cmake --build build --parallel
+```
+
+Verify the optimised binary runs and produces coherent text:
+
+```bash
+cd build
+./gpt2_kai_sve --model gpt2-medium "Once upon a time" -n 50
+```
+
 ### Step 1: Re-profile with Instruction Mix
 
 Run the Instruction Mix recipe again, this time with `gpt2_kai_sve` as the workload. Always re-profile after a change and never assume your optimisation had the intended effect.
@@ -217,7 +233,7 @@ In ATP, select **Recipes -> Instruction Mix**, set the workload to `gpt2_kai_sve
 
 The chart has changed dramatically. **SVE Operations** are now the single largest category at roughly 53% of all retired instructions - up from 0% in the baseline. **Scalar FP Operations** have collapsed to near zero. This is the inversion the diagnosis predicted: the processor is now spending the majority of its arithmetic work in 256-bit vector instructions rather than scalar ones.
 
-The **Load Operations** bar (~34%) is higher than in the baseline. This is a direct side-effect of the packed weight layout: the microkernel loads a wide tile of weight data per inner-loop iteration, so loads are a larger fraction of the total instruction stream even though the absolute number of loads has gone down.
+The **Load Operations** bar (~34%) is higher than in the baseline as a proportion of the total. This is a side-effect of the packed weight layout: the microkernel loads a wide tile of weight data per inner-loop iteration, so loads are a larger fraction of the total instruction stream even though the total instruction count is much lower.
 
 **Integer Operations** (~18%) and **Branch** (~7%) have both decreased relative to the baseline. The scalar loop generated a large number of index and counter instructions for every element; the tiled microkernel amortises that overhead across a whole tile of outputs, so far fewer integer and branch instructions are needed per unit of useful work.
 
@@ -260,7 +276,7 @@ Compare the tok/s figures from both runs:
   </tbody>
 </table>
 
-The throughput increase is the real-world consequence of the instruction-level change ATP measured. No algorithm changed, no data was restructured, no compiler flags were added. The improvement comes entirely from replacing scalar FP instructions with SVE FP instructions in the one function that dominates the runtime.
+The throughput increase is the real-world consequence of the instruction-level change ATP measured. No algorithm changed, no data was restructured, no compiler flags were added. The improvement comes entirely from replacing scalar FP instructions with SVE instructions in the one function that dominates the runtime.
 
 <p align="center">
 <img src="assets/gpt_kai_sve_textgen.gif" width="850" alt="Terminal recording of gpt2_kai_sve generating text at higher throughput after the SVE optimisation"/>
