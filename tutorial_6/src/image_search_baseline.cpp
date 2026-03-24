@@ -1,10 +1,14 @@
-// Baseline image search — scalar L2 distance, large graph, large candidate queue.
+// Baseline CLIP image search — scalar L2 distance, over-provisioned graph parameters,
+// random query order.
 //
-// Deliberately sub-optimal in three ways:
-// 1. Uses HNSWlib's default scalar L2Sqr (no SIMD) — branch-heavy, one float
-//    at a time.  Shows up as high scalar FP % and zero NEON in Instruction Mix.
-// 2. Over-provisioned graph parameters (M=48, ef_construction=200) produce a
-//    dense graph with many neighbors per node, inflating search work.
+// This is a similarity search over 50,000 CIFAR-100 images represented as
+// 768-dimensional CLIP ViT-L/14 embeddings.  It is deliberately sub-optimal
+// in three ways:
+//
+// 1. Uses HNSWlib's default scalar L2Sqr (no SIMD) — one float at a time.
+//    Shows up as high scalar FP % and zero NEON in Instruction Mix.
+// 2. Over-provisioned graph parameters (M=48, ef_construction=200, ef_search=200)
+//    produce a dense graph with excessive neighbor evaluations per hop.
 // 3. Queries arrive in random (file) order, so consecutive searches enter the
 //    graph at unrelated points — poor temporal locality in graph node accesses.
 
@@ -66,15 +70,15 @@ int main() {
     const size_t k       = DATA_K;
 
     // --- Load data ---
-    std::cout << "=== Baseline Image Search ===\n\n";
-    std::cout << "Loading " << n_base << " embeddings (dim=" << dim << ")...\n";
+    std::cout << "=== Baseline CLIP Image Search ===\n\n";
+    std::cout << "Loading " << n_base << " CLIP embeddings (dim=" << dim << ")...\n";
     auto base    = load_fvecs("data/embeddings.bin", n_base, dim);
     auto queries = load_fvecs("data/queries.bin",    n_query, dim);
     auto gt      = load_ivecs("data/groundtruth.bin", n_query, k);
 
     // --- Build index (over-provisioned parameters) ---
-    const int M = 32;
-    const int ef_construction = 150;
+    const int M = 48;
+    const int ef_construction = 200;
 
     hnswlib::L2Space space(dim);
     hnswlib::HierarchicalNSW<float> index(&space, n_base, M, ef_construction);

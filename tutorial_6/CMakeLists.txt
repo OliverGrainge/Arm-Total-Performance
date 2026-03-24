@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(tutorial_6_hnswlib LANGUAGES CXX)
+project(tutorial_6_clip_image_search LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -15,20 +15,19 @@ include_directories(src/hnswlib)
 include_directories(data)
 
 # Baseline: disable auto-vectorisation so the scalar L2 distance remains
-# scalar — this ensures a clear Instruction Mix contrast against Pass 1.
-add_executable(search_baseline  src/search_baseline.cpp)
-target_compile_options(search_baseline PRIVATE -fno-tree-vectorize)
-target_link_libraries(search_baseline pthread)
+# scalar — this ensures a clear Instruction Mix contrast against the NEON version.
+add_executable(image_search_baseline  src/image_search_baseline.cpp)
+target_compile_options(image_search_baseline PRIVATE -fno-tree-vectorize)
+target_link_libraries(image_search_baseline pthread)
 
-# Pass 1: NEON distance function (explicit intrinsics, auto-vec still off
-# for the rest of the code so the NEON improvement is clearly attributable).
-add_executable(search_pass1 src/search_pass1.cpp)
-target_link_libraries(search_pass1 pthread)
+# NEON: hand-written NEON distance function, same over-provisioned parameters.
+add_executable(image_search_neon src/image_search_neon.cpp)
+target_link_libraries(image_search_neon pthread)
 
-# Pass 2: tuned search parameters (same NEON distance as Pass 1).
-add_executable(search_pass2 src/search_pass2.cpp)
-target_link_libraries(search_pass2 pthread)
+# Tuned: NEON distance + production-grade HNSW parameters.
+add_executable(image_search_tuned src/image_search_tuned.cpp)
+target_link_libraries(image_search_tuned pthread)
 
 # Fully optimised: NEON distance + tuned parameters + sorted queries.
-add_executable(search_optimised src/search_optimised.cpp)
-target_link_libraries(search_optimised pthread)
+add_executable(image_search_optimised src/image_search_optimised.cpp)
+target_link_libraries(image_search_optimised pthread)

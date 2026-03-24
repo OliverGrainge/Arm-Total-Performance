@@ -1,14 +1,14 @@
-// Fully optimised image search — all three fixes applied.
+// Fully optimised CLIP image search — all three fixes applied.
 //
 // 1. NEON distance function (Instruction Mix fix)
 // 2. Tuned HNSW parameters  (Topdown fix)
 // 3. Queries sorted by first dimension for cache locality (Memory Access fix)
 //
-// Sorting queries by their first coordinate value groups similar queries
-// together. Consecutive similar queries traverse similar graph paths, keeping
-// the visited graph nodes warm in L1/L2 cache. This improves temporal
-// locality during the pointer-chasing graph traversal that dominates HNSW
-// search.
+// With 768-dimensional embeddings each vector occupies 3,072 bytes, so the
+// L1 data cache (typically 64 KB on Graviton) holds roughly 20 vectors.
+// Sorting queries by their first coordinate groups similar queries together.
+// Consecutive similar queries traverse overlapping graph paths, keeping the
+// visited graph nodes warm in L1/L2 cache.
 
 #define NO_MANUAL_VECTORIZATION
 #include "hnswlib.h"
@@ -115,15 +115,15 @@ int main() {
     const size_t dim     = DATA_DIM;
     const size_t k       = DATA_K;
 
-    std::cout << "=== Optimised Image Search ===\n\n";
-    std::cout << "Loading " << n_base << " embeddings (dim=" << dim << ")...\n";
+    std::cout << "=== Optimised CLIP Image Search ===\n\n";
+    std::cout << "Loading " << n_base << " CLIP embeddings (dim=" << dim << ")...\n";
     auto base    = load_fvecs("data/embeddings.bin", n_base, dim);
     auto queries = load_fvecs("data/queries.bin",    n_query, dim);
     auto gt      = load_ivecs("data/groundtruth.bin", n_query, k);
 
     // --- Tuned parameters ---
-    const int M = 24;
-    const int ef_construction = 150;
+    const int M = 16;
+    const int ef_construction = 100;
 
     L2SpaceNeon space(dim);
     hnswlib::HierarchicalNSW<float> index(&space, n_base, M, ef_construction);
@@ -156,7 +156,7 @@ int main() {
     std::cout << "      " << sort_s << " s\n\n";
 
     // --- Search in sorted order ---
-    const int ef_search = 150;
+    const int ef_search = 64;
     index.setEf(ef_search);
 
     std::cout << "[3/3] Searching  (ef_search=" << ef_search

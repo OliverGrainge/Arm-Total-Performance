@@ -1,18 +1,17 @@
-// Pass 2 — Tuned HNSW parameters.
+// Pass 1 — NEON-accelerated L2 distance function.
 //
-// Fix: Reduce M, ef_construction, and ef_search to values that balance
-// recall and throughput.  The over-provisioned baseline parameters (M=48,
-// ef_search=200) created a dense graph with large candidate queues, causing
-// Backend Bound pressure from heap operations and excessive neighbor evaluation.
+// Fix: Replace HNSWlib's scalar L2Sqr with a hand-written NEON implementation
+// that processes 4 floats per instruction (128-bit NEON on AArch64).  With
+// 768-dimensional CLIP embeddings the inner loop drops from 768 scalar
+// iterations to 48 NEON iterations (16 floats per unrolled step).
 //
-// What changed vs Pass 1:
-//   - M: 48 -> 16    (fewer edges per node — smaller graph, less work per hop)
-//   - ef_construction: 200 -> 100
-//   - ef_search: 200 -> 64  (smaller candidate queue — fewer distance evals)
+// What changed vs baseline:
+//   - Custom L2SpaceNeon class with NEON intrinsics distance function
 // What is still sub-optimal:
-//   - Random query order (no cache locality during graph traversal)
+//   - Over-provisioned graph parameters (M=48, ef_construction=200, ef_search=200)
+//   - Random query order (no cache locality)
 
-#define NO_MANUAL_VECTORIZATION
+#define NO_MANUAL_VECTORIZATION   // Prevent x86 SIMD paths in HNSWlib
 #include "hnswlib.h"
 #include "data_config.h"
 
@@ -26,7 +25,7 @@
 #include <vector>
 
 // ---------------------------------------------------------------------------
-// NEON-accelerated L2 squared distance (same as Pass 1)
+// NEON-accelerated L2 squared distance
 // ---------------------------------------------------------------------------
 static float L2SqrNeon(const void* pVect1v, const void* pVect2v, const void* qty_ptr) {
     const float* a = static_cast<const float*>(pVect1v);
@@ -36,6 +35,7 @@ static float L2SqrNeon(const void* pVect1v, const void* pVect2v, const void* qty
     float32x4_t sum = vdupq_n_f32(0.0f);
     size_t i = 0;
 
+    // Process 16 floats per iteration (4 x float32x4_t)
     for (; i + 15 < dim; i += 16) {
         float32x4_t d0 = vsubq_f32(vld1q_f32(a + i),      vld1q_f32(b + i));
         float32x4_t d1 = vsubq_f32(vld1q_f32(a + i + 4),  vld1q_f32(b + i + 4));
@@ -46,23 +46,34 @@ static float L2SqrNeon(const void* pVect1v, const void* pVect2v, const void* qty
         sum = vfmaq_f32(sum, d2, d2);
         sum = vfmaq_f32(sum, d3, d3);
     }
+
+    // Handle remaining 4-float chunks
     for (; i + 3 < dim; i += 4) {
         float32x4_t d = vsubq_f32(vld1q_f32(a + i), vld1q_f32(b + i));
         sum = vfmaq_f32(sum, d, d);
     }
+
     float result = vaddvq_f32(sum);
+
+    // Scalar tail (if dim is not a multiple of 4)
     for (; i < dim; ++i) {
         float d = a[i] - b[i];
         result += d * d;
     }
+
     return result;
 }
 
+// ---------------------------------------------------------------------------
+// Custom L2 space that uses the NEON distance function
+// ---------------------------------------------------------------------------
 class L2SpaceNeon : public hnswlib::SpaceInterface<float> {
     size_t dim_;
     size_t data_size_;
+
  public:
     L2SpaceNeon(size_t dim) : dim_(dim), data_size_(dim * sizeof(float)) {}
+
     size_t get_data_size() { return data_size_; }
     hnswlib::DISTFUNC<float> get_dist_func() { return L2SqrNeon; }
     void* get_dist_func_param() { return &dim_; }
@@ -114,15 +125,15 @@ int main() {
     const size_t dim     = DATA_DIM;
     const size_t k       = DATA_K;
 
-    std::cout << "=== Pass 2: Tuned Parameters ===\n\n";
-    std::cout << "Loading " << n_base << " embeddings (dim=" << dim << ")...\n";
+    std::cout << "=== Pass 1: NEON Distance ===\n\n";
+    std::cout << "Loading " << n_base << " CLIP embeddings (dim=" << dim << ")...\n";
     auto base    = load_fvecs("data/embeddings.bin", n_base, dim);
     auto queries = load_fvecs("data/queries.bin",    n_query, dim);
     auto gt      = load_ivecs("data/groundtruth.bin", n_query, k);
 
-    // Tuned parameters — smaller graph, smaller candidate queue
-    const int M = 24;
-    const int ef_construction = 150;
+    // Same over-provisioned parameters as baseline
+    const int M = 48;
+    const int ef_construction = 200;
 
     L2SpaceNeon space(dim);
     hnswlib::HierarchicalNSW<float> index(&space, n_base, M, ef_construction);
@@ -141,8 +152,8 @@ int main() {
     double build_s = std::chrono::duration<double>(t1 - t0).count();
     std::cout << "      " << build_s << " s\n\n";
 
-    // Reduced ef_search
-    const int ef_search = 150;
+    // Same large ef_search as baseline
+    const int ef_search = 200;
     index.setEf(ef_search);
 
     std::cout << "[2/2] Searching  (ef_search=" << ef_search
