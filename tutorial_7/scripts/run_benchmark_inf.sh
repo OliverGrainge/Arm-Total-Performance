@@ -5,7 +5,7 @@
 set -e
 
 echo "Redis server PID:"
-redis-cli info server | grep process_id
+redis6-cli info server | grep process_id
 echo ""
 echo "Running infinite GET benchmark (pipeline=32). Press Ctrl+C to stop."
 echo ""

@@ -37,8 +37,22 @@ With a small dataset this is extremely fast — everything fits in the CPU's cac
 
 ### Install Redis
 
+On Amazon Linux 2023, the package is called `redis6`:
+
 ```bash
-sudo dnf install -y redis
+sudo dnf install -y redis6
+```
+
+The AL2023 package does not include the `redis-benchmark` tool, so build it from source:
+
+```bash
+sudo dnf install -y gcc make
+curl -O https://download.redis.io/releases/redis-6.2.14.tar.gz
+tar xzf redis-6.2.14.tar.gz
+cd redis-6.2.14
+make redis-benchmark
+sudo cp src/redis-benchmark /usr/local/bin/
+cd .. && rm -rf redis-6.2.14 redis-6.2.14.tar.gz
 ```
 
 ### Configure Redis for benchmarking
@@ -46,7 +60,7 @@ sudo dnf install -y redis
 Edit the Redis configuration to disable persistence (we do not need to save data to disk, and persistence uses `fork()` which interacts badly with huge pages):
 
 ```bash
-sudo nano /etc/redis/redis.conf
+sudo nano /etc/redis6/redis6.conf
 ```
 
 Find and set these values:
@@ -61,14 +75,14 @@ This disables both RDB snapshots and the append-only file. Redis will only keep 
 ### Start Redis
 
 ```bash
-sudo systemctl start redis
-sudo systemctl enable redis
+sudo systemctl start redis6
+sudo systemctl enable redis6
 ```
 
 Verify it is running:
 
 ```bash
-redis-cli ping
+redis6-cli ping
 ```
 
 You should see `PONG`.
@@ -98,8 +112,8 @@ used_memory_human:~1.0G
 You can verify the dataset size:
 
 ```bash
-redis-cli info memory | grep used_memory_human
-redis-cli dbsize
+redis6-cli info memory | grep used_memory_human
+redis6-cli dbsize
 ```
 
 ---
@@ -130,15 +144,15 @@ The script prints the Redis server PID on startup.
 
 ### Attach ATP to the Redis process
 
-> **Important:** Attach ATP to the **redis-server** process, not the redis-benchmark client. The server is where all the data access happens.
+> **Important:** Attach ATP to the **redis6-server** process, not the benchmark client. The server is where all the data access happens.
 
 Find the PID:
 
 ```bash
-ps aux | grep redis-server
+ps aux | grep redis6-server
 ```
 
-In ATP, select **Attach to Process** and enter the PID of the `redis-server` process. Start recording and let it capture for at least 30 seconds while the benchmark runs.
+In ATP, select **Attach to Process** and enter the PID of the `redis6-server` process. Start recording and let it capture for at least 30 seconds while the benchmark runs.
 
 ### Analyse with Topdown
 
@@ -203,7 +217,7 @@ echo always | sudo tee /sys/kernel/mm/transparent_hugepage/enabled
 Restart Redis so it allocates memory with the new huge pages setting:
 
 ```bash
-sudo systemctl restart redis
+sudo systemctl restart redis6
 bash scripts/load_data.sh
 ```
 
@@ -219,7 +233,7 @@ Compare this number with your baseline. You should see improved throughput.
 
 ## Step 6: Re-profile with ATP — confirming the fix
 
-Repeat the profiling from Step 4: run the infinite benchmark, attach ATP to the redis-server process, and capture a new recording.
+Repeat the profiling from Step 4: run the infinite benchmark, attach ATP to the redis6-server process, and capture a new recording.
 
 ### Topdown comparison
 
