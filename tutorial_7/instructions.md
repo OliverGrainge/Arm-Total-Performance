@@ -185,7 +185,7 @@ This is a strong signal: Redis's performance is limited by memory access, not by
 Now select the **Memory Access** recipe in ATP. This breaks down the memory system into its components. Look at the **Data TLB Effectiveness** panel:
 
 <p align="center">
-<img src="assets/baseline_memory_access.png" width="850" alt="Data TLB Effectiveness — elevated DTLB MPKI and walk ratio"/>
+<img src="assets/baseline_memory_access.png" width="250" alt="Data TLB Effectiveness — elevated DTLB MPKI and walk ratio"/>
 </p>
 
 Here are the key numbers and what they mean:
@@ -215,10 +215,10 @@ The root cause is a mismatch between the dataset size and the page size:
 
 - Redis holds **~1 GB** of data (keys, values, and hash table entries) in memory
 - The operating system splits this into **~250,000 small pages** (4 KB each)
-- The TLB can only remember the locations of about **48 pages** at a time
+- The L1 DTLB can only remember the locations of a **small number of pages** at a time (typically a few dozen on Arm Neoverse cores)
 - Redis lookups are **random** — each request hashes to a different key, landing on a different page
 
-Since the TLB can track 48 pages but the dataset spans 250,000 pages, random lookups almost always land on a page the TLB does not know about. The CPU must do a slow page table walk to find it.
+Since the L1 DTLB can only track a few dozen pages but the dataset spans 250,000 pages, random lookups almost always land on a page the TLB does not know about. The CPU must do a slow page table walk to find it.
 
 ---
 
@@ -231,7 +231,7 @@ ATP has identified the problem: the TLB cannot keep up with the number of small 
 With the default 4 KB pages:
 
 - 1 GB of data = **~250,000 pages**
-- The TLB can remember **~48** at a time
+- The L1 DTLB can only track **a few dozen** at a time
 - Random lookups constantly miss the TLB → slow page table walks
 
 With 2 MB huge pages:
@@ -326,7 +326,7 @@ Backend Bound has dropped by nearly 5 percentage points — the CPU is spending 
 ### Data TLB comparison
 
 <p align="center">
-<img src="assets/hugepages_memory_access.png" width="850" alt="Data TLB Effectiveness after huge pages — all metrics improved"/>
+<img src="assets/hugepages_memory_access.png" width="250" alt="Data TLB Effectiveness after huge pages — all metrics improved"/>
 </p>
 
 | Metric | Before | After Huge Pages | Change |
@@ -351,7 +351,7 @@ This is the value of profiling with ATP: you can trace the improvement from the 
 | Step | What you did | What ATP showed |
 |------|-------------|-----------------|
 | **Baseline** | 1M keys, 1 KB values, default 4 KB pages | **Backend Bound at 63%** — the CPU spends most of its time waiting for memory. Data TLB metrics show frequent misses and page table walks (DTLB MPKI: 1.52, Walk Ratio: 0.43). |
-| **Diagnosis** | Examined the Topdown and Memory Access recipes | The bottleneck is **TLB misses**: ~250,000 small pages for a 1 GB dataset, but the TLB can only track ~48 at a time. Random lookups constantly miss. |
+| **Diagnosis** | Examined the Topdown and Memory Access recipes | The bottleneck is **TLB misses**: ~250,000 small pages for a 1 GB dataset, but the L1 DTLB can only track a few dozen at a time. Random lookups constantly miss. |
 | **Optimisation** | Enabled THP and `defrag`, restarted Redis with `--disable-thp no` | **DTLB misses drop by 68%**, page table walks drop by 60%. Backend Bound falls from 63% to 58%. Throughput improves by ~13%. |
 
 ### The profile → diagnose → fix → confirm loop
