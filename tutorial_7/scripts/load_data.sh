@@ -12,7 +12,7 @@ redis-benchmark -t set -n 2000000 -r 1000000 -d 1024 -P 32 -q
 
 echo ""
 echo "Redis memory usage:"
-redis6-cli info memory | grep -E "used_memory_human|used_memory_peak_human"
+redis-cli info memory | grep -E "used_memory_human|used_memory_peak_human"
 echo ""
 echo "Total keys:"
-redis6-cli dbsize
+redis-cli dbsize
