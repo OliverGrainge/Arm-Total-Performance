@@ -172,4 +172,14 @@ with gr.Blocks(theme=theme, css=css, title="CLIP Image Search") as demo:
     )
 
 if __name__ == "__main__":
-    demo.launch()
+    # Monkey-patch gradio_client bug where additionalProperties=True (a bool)
+    # gets passed to get_type() which tries "const" in schema on it.
+    import gradio_client.utils as _gc_utils
+    _orig_get_type = _gc_utils.get_type
+    def _patched_get_type(schema):
+        if not isinstance(schema, dict):
+            return "Any"
+        return _orig_get_type(schema)
+    _gc_utils.get_type = _patched_get_type
+
+    demo.launch(server_name="0.0.0.0", server_port=7860, share=True)
