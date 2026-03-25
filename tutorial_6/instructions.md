@@ -170,36 +170,19 @@ Record this baseline throughput. You will compare it against the optimised confi
 
 While the benchmark runs, PostgreSQL does the real work: the `postgres` backend process traverses the HNSW graph, computes L2 distances over 512-dimensional vectors, and manages shared memory buffers. This is the process you will profile with ATP.
 
-### Find the PostgreSQL backend PID
+### Record the workload with ATP
 
-In one terminal, start the benchmark:
+Start the benchmark in one terminal:
 
 ```bash
 python scripts/benchmark.py
 ```
 
-In a second terminal, find the backend process:
+In ATP, select **Attach to Process** and choose the `postgres` backend process connected to the `clip_search` database. Start recording and let it capture for at least 30 seconds while the benchmark runs.
 
-```bash
-# The backend process is the one connected to clip_search
-sudo -u postgres psql -c "SELECT pid, datname, state FROM pg_stat_activity WHERE datname = 'clip_search';"
-```
+### Analyse with Topdown
 
-Note the PID.
-
-### Record with perf
-
-With the benchmark still running, record the postgres backend:
-
-```bash
-sudo perf record -g -p <PID> -o perf_baseline.data -- sleep 30
-```
-
-This captures 30 seconds of profiling data from the postgres process handling the queries.
-
-### Load in ATP
-
-Open ATP and import `perf_baseline.data`. Select the **Topdown** recipe to see the high-level breakdown.
+Once the capture completes, select the **Topdown** recipe to see the high-level breakdown.
 
 In the Topdown summary, look at the four buckets:
 
@@ -350,15 +333,7 @@ You should see a noticeable improvement in throughput. The TLB now needs far few
 
 ## Step 8: Re-profile with ATP
 
-Repeat the profiling process from Step 5 with huge pages enabled.
-
-Start the benchmark, find the PID, and record:
-
-```bash
-sudo perf record -g -p <PID> -o perf_hugepages.data -- sleep 30
-```
-
-Load `perf_hugepages.data` in ATP and compare against the baseline.
+Repeat the profiling process from Step 5 with huge pages enabled. Start the benchmark, attach ATP to the postgres backend, and capture a new recording.
 
 ### Topdown comparison
 
