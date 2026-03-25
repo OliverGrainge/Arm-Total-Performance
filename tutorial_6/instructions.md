@@ -1,6 +1,6 @@
-# Tutorial 6: Capstone — Optimising a CLIP Image Search Application with Arm Total Performance
+# Tutorial 6: Capstone — Profiling a CLIP Image Search Application with Arm Total Performance
 
-In the previous tutorials you profiled small programs to learn individual ATP recipes. This final tutorial brings everything together: you will speed up a **real application** — a text-to-image search engine that uses [pgvector](https://github.com/pgvector/pgvector), a plugin for the PostgreSQL database.
+In the previous tutorials you profiled small programs to learn individual ATP recipes. This final tutorial brings everything together: you will profile a **real application** — a text-to-image search engine that uses [pgvector](https://github.com/pgvector/pgvector), a plugin for the PostgreSQL database — and use ATP's Topdown and Memory Access recipes to identify its performance bottleneck.
 
 ## What the application does
 
@@ -26,7 +26,7 @@ The application has two layers:
 
 **PostgreSQL + pgvector** — the search engine. It stores all 50,000 image vectors and finds the closest matches when asked. This is the part where performance matters most.
 
-A single search returns in milliseconds. But when the system needs to handle **thousands of searches** — imagine many users searching at the same time — every bit of slowness adds up. That is the workload you will profile and speed up.
+A single search returns in milliseconds. But when the system needs to handle **thousands of searches** — imagine many users searching at the same time — every bit of slowness adds up. That is the workload you will profile with ATP to understand where the CPU spends its time.
 
 ## Before you begin
 
@@ -52,9 +52,7 @@ sudo dnf install -y postgresql16-server postgresql16-server-devel postgresql16-c
 | Term | What it means |
 |------|---------------|
 | **Page** | The operating system splits memory into small, equal-sized chunks called "pages". By default each page is 4 KB — a very small piece of memory. |
-| **Huge Pages** | A Linux feature that uses much bigger memory chunks (2 MB instead of 4 KB). This helps the CPU manage large amounts of memory more efficiently, as explained in Step 5. |
 | **TLB** | Translation Lookaside Buffer — a tiny, fast lookup table built into the CPU. It remembers where recently used memory pages are stored. Think of it like a short contacts list on your phone — it is quick to check, but can only hold a limited number of entries. When the page you need is not in the list (a "TLB miss"), the CPU has to do a much slower search to find it. |
-| **shared_buffers** | PostgreSQL's own memory area for storing data it uses frequently. This is where your image vectors live in memory. |
 
 ---
 
@@ -183,7 +181,7 @@ Database:  clip_search
 =============================================
 ```
 
-Write down this number (queries per second). You will compare it against the improved version later.
+Write down this number (queries per second). This is the baseline you will investigate with ATP.
 
 ---
 
