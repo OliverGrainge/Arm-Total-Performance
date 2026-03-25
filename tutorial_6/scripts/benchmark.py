@@ -74,7 +74,7 @@ def run_benchmark(db_name, query_embeddings, n_queries, k, ef_search):
 def main():
     parser = argparse.ArgumentParser(description="Benchmark pgvector image search")
     parser.add_argument("--db-name", default="clip_search", help="PostgreSQL database name")
-    parser.add_argument("--data-dir", default="data", help="Data directory")
+    parser.add_argument("--data-dir", default=os.path.join(os.path.dirname(__file__), "..", "data"), help="Data directory")
     parser.add_argument("--n-queries", type=int, default=10000, help="Number of queries to run")
     parser.add_argument("--k", type=int, default=10, help="Number of nearest neighbors")
     parser.add_argument("--ef-search", type=int, default=200, help="HNSW ef_search parameter")

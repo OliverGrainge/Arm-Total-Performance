@@ -35,6 +35,18 @@ A single search returns in milliseconds. But when the system needs to handle **t
 - **Python 3.8+** with pip
 - **ATP** installed and configured
 
+Install the required Python packages:
+
+```bash
+pip install torch open-clip-torch Pillow numpy gradio psycopg2-binary
+```
+
+Install PostgreSQL and its development headers (needed to build the pgvector extension from source):
+
+```bash
+sudo dnf install -y postgresql16-server postgresql16-server-devel postgresql16-contrib
+```
+
 ## Terms used in this tutorial
 
 | Term | What it means |
@@ -46,13 +58,13 @@ A single search returns in milliseconds. But when the system needs to handle **t
 
 ---
 
-## Step 1: Install PostgreSQL and pgvector
+## Step 1: Set up PostgreSQL and pgvector
 
-```bash
-sudo dnf install -y postgresql16-server postgresql16-server-devel postgresql16-contrib
-```
+PostgreSQL is the database that will store the 50,000 image vectors and answer search queries. pgvector is an extension that adds vector search capabilities to PostgreSQL — without it, PostgreSQL has no way to efficiently compare and rank vectors. It is not available as a pre-built package, so it needs to be compiled from source and installed into your PostgreSQL installation.
 
-Initialise the database cluster (first time only) and start PostgreSQL:
+### Initialise and start PostgreSQL
+
+Before PostgreSQL can be used for the first time, its on-disk storage (the "database cluster") needs to be initialised. This creates the system tables and configuration files that every PostgreSQL instance requires. You only need to do this once.
 
 ```bash
 sudo postgresql-setup --initdb
@@ -60,13 +72,19 @@ sudo systemctl start postgresql
 sudo systemctl enable postgresql
 ```
 
-Create a superuser for your Linux account:
+The `enable` command ensures PostgreSQL starts automatically if the instance is rebooted.
+
+### Create a superuser for your Linux account
+
+By default, PostgreSQL only has a built-in `postgres` user. Creating a superuser that matches your Linux username lets you run `psql` and other database commands without having to switch to the `postgres` account each time.
 
 ```bash
 sudo -u postgres createuser --superuser $USER
 ```
 
-Install the pgvector extension from source:
+### Build and install pgvector
+
+pgvector is compiled against the PostgreSQL development headers that were installed in the "Before you begin" step. The build process produces a shared library and SQL files that PostgreSQL loads when you enable the extension in a database.
 
 ```bash
 git clone --branch v0.8.0 https://github.com/pgvector/pgvector.git
@@ -87,11 +105,13 @@ python3 scripts/setup_data.py
 ```
 
 This script:
-1. Downloads a dataset of 60,000 small photographs called **CIFAR-100** (~170 MB)
+1. Downloads a dataset of 50,000 small photographs called **CIFAR-100** (~170 MB)
 2. Uses the **CLIP** AI model to convert each image into a vector (a list of 512 numbers)
 3. Creates a PostgreSQL database called `clip_search`
 4. Loads all 50,000 image vectors into the database and builds the HNSW search index
 5. Saves the images and some pre-made query vectors locally for the dashboard and benchmark
+
+This may take around 5 minutes depending on your instance.
 
 You can verify the database is set up correctly:
 
@@ -105,19 +125,19 @@ You should see `50000`.
 
 ## Step 3: Try the dashboard
 
-If you are connecting to your EC2 instance via SSH, use **port forwarding** so you can access the dashboard from your local browser. Connect with the `-L` flag:
-
-```bash
-ssh -L 7860:localhost:7860 -i "your-key.pem" ec2-user@<your-instance-ip>
-```
-
-Then start the dashboard:
+Start the dashboard:
 
 ```bash
 python3 dashboard/app.py
 ```
 
-Open `http://localhost:7860` in your local browser. Type a description — "a red sports car", "sunset over the ocean", "a cute puppy" — and the dashboard returns the 10 most similar images from the database.
+Open `http://localhost:7860` in your browser.
+
+> **Connecting remotely?** If the instance is not your local machine, you will need SSH port forwarding so your browser can reach the dashboard. Add the `-L` flag when connecting:
+> ```bash
+> ssh -L 7860:localhost:7860 user@<your-instance-ip>
+> ```
+> Then open `http://localhost:7860` in your local browser as normal. Type a description — "a red sports car", "sunset over the ocean", "a cute puppy" — and the dashboard returns the 10 most similar images from the database.
 
 <p align="center">
 <img src="assets/image_search.gif" width="700" alt="Dashboard demo — typing a text query and retrieving matching images"/>
@@ -143,15 +163,21 @@ Loaded 10000 query embeddings (dim=512)
 Benchmark: 10000 queries, k=10, ef_search=200
 Database:  clip_search
 
-   1000 / 10000  (142.3 queries/sec)
-   2000 / 10000  (139.8 queries/sec)
-   ...
-  10000 / 10000  (141.5 queries/sec)
+    1000 / 10000  (436.2 queries/sec)
+    2000 / 10000  (439.8 queries/sec)
+    3000 / 10000  (441.5 queries/sec)
+    4000 / 10000  (441.8 queries/sec)
+    5000 / 10000  (441.7 queries/sec)
+    6000 / 10000  (442.6 queries/sec)
+    7000 / 10000  (443.1 queries/sec)
+    8000 / 10000  (442.7 queries/sec)
+    9000 / 10000  (443.2 queries/sec)
+   10000 / 10000  (443.4 queries/sec)
 
 =============================================
-  Total time:     70.67 s
-  Throughput:     141.5 queries/sec
-  Avg latency:    7.07 ms/query
+  Total time:     22.55 s
+  Throughput:     443.4 queries/sec
+  Avg latency:    2.26 ms/query
   Queries:        10000
   ef_search:      200
 =============================================

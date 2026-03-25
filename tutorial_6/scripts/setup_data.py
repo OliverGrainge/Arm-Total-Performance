@@ -162,7 +162,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Download CIFAR-100, generate CLIP embeddings, load into pgvector"
     )
-    parser.add_argument("--data-dir", default="data", help="Output directory (default: data)")
+    parser.add_argument("--data-dir", default=os.path.join(os.path.dirname(__file__), "..", "data"), help="Output directory (default: data)")
     parser.add_argument("--db-name", default="clip_search", help="PostgreSQL database name")
     parser.add_argument("--model", default="ViT-B-32", help="CLIP model name")
     parser.add_argument("--batch-size", type=int, default=64, help="CLIP inference batch size")
