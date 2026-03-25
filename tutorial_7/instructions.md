@@ -1,19 +1,30 @@
-# Tutorial 7: Profiling and Optimising Redis on Arm with ATP
+# Tutorial 7: Optimising a Redis Database with Arm Total Performance
 
-Redis is one of the most widely used in-memory data stores. It powers caches, session stores, and real-time analytics in applications around the world. Because all data lives in memory and a single thread handles every request, Redis performance depends heavily on how efficiently the CPU can access memory.
+## What is Redis?
 
-In this tutorial you will load a large dataset into Redis, benchmark it, use ATP to identify the bottleneck, and apply a kernel-level optimisation to improve throughput.
+[Redis](https://redis.io/) is one of the most popular in-memory databases in the world. It stores data as simple key-value pairs — you give it a name (the key) and some data (the value), and it keeps everything in RAM so it can return results in microseconds.
 
-## How Redis works (the short version)
+Redis is used everywhere:
 
-Redis stores all data in memory as key-value pairs. When a client asks for a key, Redis:
+- **Caching** — web applications store frequently accessed data in Redis so they do not have to query a slower database every time
+- **Session storage** — websites keep user login sessions in Redis for fast access across multiple servers
+- **Real-time analytics** — dashboards and monitoring systems use Redis to aggregate and query live metrics
+- **Message queues** — Redis acts as a lightweight broker between services that need to pass data to each other
 
-1. **Hashes** the key name to find which bucket it belongs to
-2. **Looks up** the bucket in a large hash table spread across memory
-3. **Reads** the value data from wherever it is stored in memory
-4. **Sends** the result back to the client
+Because Redis is **single-threaded** — one CPU core handles every request — its performance depends entirely on how efficiently that single core can access memory. When the dataset is small, everything fits in the CPU's caches and responses are near-instant. But as the dataset grows into the hundreds of megabytes, the CPU starts spending more time *waiting for memory* than doing useful work.
 
-With a small dataset this is extremely fast — everything fits in the CPU's caches. But when the dataset grows to hundreds of megabytes or more, the hash table and values are spread across many memory pages. Random lookups start hitting memory that is not in the cache, and the CPU spends more time waiting for data than doing useful work.
+In this tutorial you will use ATP to identify exactly where this slowdown comes from, and apply a kernel-level optimisation to fix it.
+
+## How Redis handles a request
+
+When a client asks Redis for a key, the following happens inside the server:
+
+1. **Hash** the key name to find which bucket it belongs to
+2. **Look up** the bucket in a large hash table spread across memory
+3. **Read** the value data from wherever it is stored in memory
+4. **Send** the result back to the client
+
+Steps 2 and 3 are where performance matters. With a million keys and 1 GB of data, the hash table and values are scattered across many memory pages. Each lookup lands on a random page — the CPU cannot predict which data it will need next, so it cannot prefetch anything into its caches.
 
 ## Before you begin
 
@@ -50,9 +61,15 @@ cd .. && rm -rf redis-7.2.7 redis-7.2.7.tar.gz
 
 This installs `redis-server`, `redis-cli`, and `redis-benchmark` to `/usr/local/bin/`.
 
-### Disable Transparent Huge Pages (baseline)
+---
 
-For the baseline measurement, ensure THP is disabled so Redis uses the default 4 KB pages:
+## Step 2: Set up the baseline environment
+
+Before measuring anything, set up a clean baseline: Transparent Huge Pages disabled, Redis running with default 4 KB pages.
+
+### Disable Transparent Huge Pages
+
+Ensure THP is turned off so the baseline uses the default small pages:
 
 ```bash
 echo never | sudo tee /sys/kernel/mm/transparent_hugepage/enabled
@@ -61,13 +78,13 @@ echo never | sudo tee /sys/kernel/mm/transparent_hugepage/defrag
 
 ### Start Redis
 
-Start Redis with persistence disabled (we do not need to save data to disk):
+Start Redis with persistence disabled. We do not need Redis to save data to disk, and disabling persistence avoids `fork()` calls that would complicate profiling later:
 
 ```bash
 redis-server --daemonize yes --save "" --appendonly no
 ```
 
-> **Note:** You may see warnings about memory overcommit. These are safe to ignore for this tutorial. If you want to suppress them: `sudo sysctl vm.overcommit_memory=1`
+> **Note:** You may see a warning about memory overcommit. This is safe to ignore for this tutorial. If you want to suppress it: `sudo sysctl vm.overcommit_memory=1`
 
 Verify it is running:
 
@@ -77,9 +94,7 @@ redis-cli ping
 
 You should see `PONG`.
 
----
-
-## Step 2: Load data
+### Load data
 
 The load script uses `redis-benchmark` to populate Redis with approximately 1 million unique keys, each with a 1 KB value. This creates a dataset of roughly 1 GB in memory — large enough to put pressure on the CPU's memory system.
 
@@ -100,10 +115,20 @@ You should see approximately 1 GB of memory used and around 1 million keys.
 
 ## Step 3: Run the baseline benchmark
 
-Before making any changes, measure the current performance. The benchmark script runs 5 million random GET operations with pipelining enabled, which maximises throughput and ensures the bottleneck is memory access rather than network overhead:
+Measure the current performance. The benchmark script runs 5 million random GET operations with pipelining enabled (sending 32 commands per round trip). Pipelining maximises throughput and ensures the bottleneck is memory access inside the server rather than network round trips:
 
 ```bash
 bash scripts/run_benchmark.sh
+```
+
+Expected output (timings vary by instance):
+
+```
+Summary:
+  throughput summary: 777363.19 requests per second
+  latency summary (msec):
+          avg       min       p50       p95       p99       max
+        1.859     0.456     1.879     2.215     2.295     2.911
 ```
 
 Write down the **requests per second** number. This is your baseline.
@@ -112,9 +137,11 @@ Write down the **requests per second** number. This is your baseline.
 
 ## Step 4: Profile the baseline with ATP
 
+The benchmark tells you *how fast* Redis is, but not *why* it is that speed. ATP answers the why — it shows where the CPU is spending its time and what is slowing it down.
+
 ### Start the workload
 
-Run the infinite benchmark in one terminal:
+Run the infinite benchmark in one terminal — this keeps the workload running so you have time to attach the profiler:
 
 ```bash
 bash scripts/run_benchmark_inf.sh
@@ -124,44 +151,55 @@ The script prints the Redis server PID on startup.
 
 ### Attach ATP to the Redis process
 
-> **Important:** Attach ATP to the **redis-server** process, not the redis-benchmark client. The server is where all the data access happens.
+> **Important:** Attach ATP to the **redis-server** process, not the redis-benchmark client. Redis is single-threaded, so all the data access — hashing keys, looking up the hash table, reading values — happens in this one process. The benchmark client only sends commands and waits for responses.
 
-Find the PID if you need it:
+You can find the PID from the script output above, or look it up:
 
 ```bash
 ps aux | grep redis-server
 ```
 
-In ATP, select **Attach to Process** and enter the PID of the `redis-server` process. Start recording and let it capture for at least 30 seconds while the benchmark runs.
+The PID is the number in the second column (e.g. `66484` in `... 66484 ... redis-server`).
+
+In ATP, select **Attach to Process** and enter the PID of the `redis-server` process. Start recording and let it capture for at least 30 seconds while the benchmark runs. When you are done, stop the infinite benchmark with `Ctrl+C`.
 
 ### Analyse with Topdown
 
-Once the capture completes, select the **Topdown** recipe.
+Once the capture completes, select the **Topdown** recipe to see where the CPU is spending its time. The Topdown model splits all CPU activity into four categories:
+
+- **Frontend Bound** — the CPU is stalled fetching or decoding instructions
+- **Backend Bound** — the CPU is stalled waiting for data (memory, caches)
+- **Retiring** — the CPU is doing useful work
+- **Bad Speculation** — the CPU did work that had to be thrown away (mispredicted branches)
 
 <p align="center">
-<img src="assets/baseline_topdown.png" width="850" alt="Topdown summary for Redis baseline"/>
+<img src="assets/baseline_topdown.png" width="850" alt="Topdown summary for Redis baseline — Backend Bound dominant at ~62%"/>
 </p>
 
-You should see that **Backend Bound** is the largest category (around 60%). This tells you the CPU is spending most of its time waiting for data to arrive from memory.
+You should see that **Backend Bound** is the largest category at around **63%**. This means the CPU is spending most of its time *waiting for data to arrive from memory* rather than doing useful work. Only about 16% of the time is spent on actual computation (Retiring).
 
-### Analyse with Memory Access
+This is a strong signal: Redis's performance is limited by memory access, not by the complexity of its code. The next step is to find out exactly *what* about memory access is the problem.
 
-Now select the **Memory Access** recipe. The key metrics to look at are in the **Data TLB Effectiveness** panel:
+### Drill into memory with the Memory Access recipe
+
+Now select the **Memory Access** recipe in ATP. This breaks down the memory system into its components. Look at the **Data TLB Effectiveness** panel:
 
 <p align="center">
-<img src="assets/baseline_memory_access.png" width="850" alt="Memory Access metrics for Redis baseline"/>
+<img src="assets/baseline_memory_access.png" width="850" alt="Data TLB Effectiveness — elevated DTLB MPKI and walk ratio"/>
 </p>
 
-| Metric | What to look for |
-|--------|-----------------|
-| **DTLB MPKI** | Data TLB misses per 1000 instructions — how often the TLB cannot find the page |
-| **L1 Data TLB MPKI** | L1 DTLB misses per 1000 instructions — misses at the first (fastest) TLB level |
-| **DTLB Walk Ratio** | Percentage of TLB accesses that trigger an expensive page table walk |
-| **L1 Data TLB Miss Ratio** | Percentage of L1 DTLB lookups that miss |
+Here are the key numbers and what they mean:
 
-#### Understanding what the numbers mean
+| Metric | Baseline value | What it tells you |
+|--------|---------------|-------------------|
+| **DTLB MPKI** | 1.52 | 1.52 data TLB misses per 1000 instructions — every ~650 instructions triggers a TLB miss |
+| **L1 Data TLB MPKI** | 11.81 | 11.81 L1 DTLB misses per 1000 instructions — the first-level TLB is frequently unable to find the page |
+| **DTLB Walk Ratio** | 0.43 | 0.43% of all TLB accesses trigger an expensive page table walk |
+| **L1 Data TLB Miss Ratio** | 3.47 | 3.47% of L1 DTLB lookups miss — roughly 1 in 29 memory accesses |
 
-Every time Redis reads data from memory, the CPU must translate the virtual address to a physical one. This goes through a chain:
+#### Why these numbers matter
+
+Every time Redis reads data from memory, the CPU must translate the virtual address to a physical one. This translation goes through a chain, each level slower than the last:
 
 ```
 Memory access → L1 DTLB → (miss?) → L2 TLB → (miss?) → Page table walk
@@ -169,15 +207,26 @@ Memory access → L1 DTLB → (miss?) → L2 TLB → (miss?) → Page table walk
                (~1 cycle)    (~5-10 cycles)    (~10-100+ cycles)
 ```
 
-With ~1 GB of data spread across roughly **250,000 small pages** (4 KB each), and the TLB only able to track about **48 pages** at a time, random key lookups cause frequent TLB misses. Each miss that is not caught by the L2 TLB triggers an expensive page table walk — the CPU must read multiple levels of page tables from memory to find the physical address.
+The numbers above tell a story: **3.5% of memory accesses miss the fast L1 DTLB**, and a portion of those miss the L2 TLB as well (L2 Unified TLB Miss Ratio: 13.14), triggering expensive page table walks. Each walk can cost 10–100+ cycles as the CPU reads multiple levels of page tables from memory.
 
-Even a modest DTLB MPKI (e.g. 1–2 misses per 1000 instructions) adds up because each page table walk can cost 10–100+ cycles. With the CPU already 60% Backend Bound, every source of memory stall matters.
+#### Why Redis has this problem
+
+The root cause is a mismatch between the dataset size and the page size:
+
+- Redis holds **~1 GB** of data (keys, values, and hash table entries) in memory
+- The operating system splits this into **~250,000 small pages** (4 KB each)
+- The TLB can only remember the locations of about **48 pages** at a time
+- Redis lookups are **random** — each request hashes to a different key, landing on a different page
+
+Since the TLB can track 48 pages but the dataset spans 250,000 pages, random lookups almost always land on a page the TLB does not know about. The CPU must do a slow page table walk to find it.
 
 ---
 
 ## Step 5: Optimisation — Transparent Huge Pages
 
-### Why huge pages help
+ATP has identified the problem: the TLB cannot keep up with the number of small pages. The fix is to use **fewer, larger pages** so the TLB can cover more memory with the same number of entries.
+
+### Why huge pages fix the problem
 
 With the default 4 KB pages:
 
@@ -188,7 +237,8 @@ With the default 4 KB pages:
 With 2 MB huge pages:
 
 - 1 GB of data = **~512 pages**
-- The TLB can cover a much larger portion of memory
+- Each TLB entry covers **512×** more memory
+- The TLB can cover a much larger portion of the dataset
 - Far fewer TLB misses → faster memory access
 
 ### Enable Transparent Huge Pages
@@ -198,18 +248,22 @@ echo always | sudo tee /sys/kernel/mm/transparent_hugepage/enabled
 echo always | sudo tee /sys/kernel/mm/transparent_hugepage/defrag
 ```
 
-The `defrag` setting tells the kernel to actively create contiguous 2 MB regions in memory rather than waiting passively.
+The `defrag` setting tells the kernel to actively create contiguous 2 MB regions in memory rather than waiting passively. Without this, the kernel may not promote pages to huge pages quickly enough.
 
 ### Restart Redis with THP support
 
-By default, Redis disables Transparent Huge Pages for itself because they can cause high memory usage when Redis forks for persistence (RDB/AOF saves). Since we have persistence disabled, we can safely tell Redis to allow them with `--disable-thp no`:
+By default, Redis disables Transparent Huge Pages for its own process. It does this because THP can cause high memory usage when Redis forks for persistence (RDB/AOF saves). Since we have persistence disabled, there are no forks, so huge pages are safe. We tell Redis to allow them with `--disable-thp no`:
 
 ```bash
 redis-cli shutdown
 redis-server --daemonize yes --save "" --appendonly no --disable-thp no
 ```
 
-Reload the data so Redis allocates memory with huge pages:
+> **Note:** You will see warnings about THP being enabled and memory overcommit. These are safe to ignore — we have disabled persistence, so the issues Redis warns about do not apply.
+
+### Reload data
+
+Reload the data so Redis allocates memory with huge pages from the start:
 
 ```bash
 bash scripts/load_data.sh
@@ -217,11 +271,19 @@ bash scripts/load_data.sh
 
 ### Verify huge pages are being used
 
+This is an important check. If Redis is not actually using huge pages, the optimisation will have no effect:
+
 ```bash
 sudo grep -e AnonHugePages /proc/$(redis-cli info server | grep process_id | cut -d: -f2 | tr -d '[:space:]')/smaps_rollup
 ```
 
-You should see a large number — close to the full dataset size (e.g. `AnonHugePages: 1112064 kB` for ~1 GB). If it shows 0 kB, check that THP is enabled (`cat /sys/kernel/mm/transparent_hugepage/enabled` should show `[always]`) and that Redis was started with `--disable-thp no`.
+You should see a large number close to the full dataset size (e.g. `AnonHugePages: 1112064 kB` for ~1 GB).
+
+If it shows `0 kB`, check that:
+- THP is enabled: `cat /sys/kernel/mm/transparent_hugepage/enabled` should show `[always]`
+- Defrag is enabled: `cat /sys/kernel/mm/transparent_hugepage/defrag` should show `[always]`
+- Redis was started with `--disable-thp no`
+- Redis's THP flag is on: `cat /proc/$(redis-cli info server | grep process_id | cut -d: -f2 | tr -d '[:space:]')/status | grep THP` should show `THP_enabled: 1`
 
 ### Re-benchmark
 
@@ -229,56 +291,79 @@ You should see a large number — close to the full dataset size (e.g. `AnonHuge
 bash scripts/run_benchmark.sh
 ```
 
-Compare this number with your baseline. You should see improved throughput.
+Expected output:
+
+```
+Summary:
+  throughput summary: 875043.69 requests per second
+  latency summary (msec):
+          avg       min       p50       p95       p99       max
+        1.626     0.464     1.631     1.967     2.031     2.831
+```
+
+Compare this with your baseline: throughput increased from ~777K to ~875K requests per second — a **~13% improvement** — and average latency dropped from 1.86 ms to 1.63 ms.
 
 ---
 
 ## Step 6: Re-profile with ATP — confirming the fix
 
-Repeat the profiling from Step 4: run the infinite benchmark, attach ATP to the redis-server process, and capture a new recording.
+A benchmark number going up is good, but it does not tell you *why* it improved. ATP does. Repeat the profiling from Step 4: run the infinite benchmark, attach ATP to the `redis-server` process, and capture a new recording.
 
 ### Topdown comparison
 
 <p align="center">
-<img src="assets/hugepages_topdown.png" width="850" alt="Topdown after huge pages"/>
+<img src="assets/hugepages_topdown.png" width="850" alt="Topdown after huge pages — Backend Bound reduced"/>
 </p>
 
-| Category      | Before       | After Huge Pages | What this means |
-|---------------|--------------|------------------|-----------------|
-| Backend Bound | High (~60%)  | Lower            | Less time waiting for memory |
-| Retiring      | Low          | Higher           | More time doing useful work |
+| Category      | Before  | After Huge Pages | What this means |
+|---------------|---------|------------------|-----------------|
+| Frontend Bound | 24.21% | 27.81%          | Slightly increased — now that memory stalls are reduced, frontend becomes a larger relative share |
+| Backend Bound | 62.84%  | 58.19%           | Less time waiting for memory |
+| Retiring      | 15.66%  | 15.88%           | Slightly more time doing useful work |
+
+Backend Bound has dropped by nearly 5 percentage points — the CPU is spending less time stalled on memory. Notice that Frontend Bound increased slightly: this is normal. When you remove one bottleneck (memory stalls), the remaining bottlenecks become a larger share of the total. The overall effect is positive, as confirmed by the 13% throughput improvement in the benchmark.
 
 ### Data TLB comparison
 
 <p align="center">
-<img src="assets/hugepages_memory_access.png" width="850" alt="Memory Access after huge pages"/>
+<img src="assets/hugepages_memory_access.png" width="850" alt="Data TLB Effectiveness after huge pages — all metrics improved"/>
 </p>
 
-| Metric | Before | After Huge Pages | What changed |
-|--------|--------|------------------|--------------|
-| DTLB MPKI | ~1.4 | ~0.5 | ~65% fewer TLB misses |
-| L1 Data TLB MPKI | ~11 | ~4 | ~65% fewer L1 DTLB misses |
-| DTLB Walk Ratio | ~0.39 | ~0.13 | ~67% fewer page table walks |
-| L1 Data TLB Miss Ratio | ~3.2 | ~1.2 | ~62% fewer L1 misses per access |
+| Metric | Before | After Huge Pages | Change |
+|--------|--------|------------------|--------|
+| DTLB MPKI | 1.52 | 0.48 | **-68%** fewer TLB misses |
+| L1 Data TLB MPKI | 11.81 | 10.87 | **-8%** fewer L1 DTLB misses |
+| L2 Unified TLB MPKI | 1.65 | 0.55 | **-67%** fewer L2 TLB misses |
+| DTLB Walk Ratio | 0.43 | 0.17 | **-60%** fewer page table walks |
+| L1 Data TLB Miss Ratio | 3.47 | 3.19 | **-8%** fewer L1 misses per access |
+| L2 Unified TLB Miss Ratio | 13.14 | 4.66 | **-65%** fewer L2 misses per access |
+
+The most expensive metric — **DTLB MPKI** (the overall TLB miss rate that triggers page table walks) — dropped by 68%. The **L2 Unified TLB Miss Ratio** dropped by 65%, meaning far fewer L1 TLB misses escalate to expensive page table walks. The L1 Data TLB Miss Ratio only dropped by 8% — the L1 TLB is very small so it still misses frequently, but with huge pages the L2 TLB can catch most of those misses before they become costly walks.
 
 With huge pages, each TLB entry covers 2 MB instead of 4 KB — 512 times more memory. The TLB can now track a much larger portion of the dataset, so random key lookups trigger far fewer expensive page table walks.
+
+This is the value of profiling with ATP: you can trace the improvement from the high-level Topdown view (less Backend Bound) all the way down to the specific hardware counter (fewer DTLB walks) that explains it.
 
 ---
 
 ## Summary
 
-You loaded a 1 GB dataset into Redis and used ATP to find and fix a performance problem:
+| Step | What you did | What ATP showed |
+|------|-------------|-----------------|
+| **Baseline** | 1M keys, 1 KB values, default 4 KB pages | **Backend Bound at 63%** — the CPU spends most of its time waiting for memory. Data TLB metrics show frequent misses and page table walks (DTLB MPKI: 1.52, Walk Ratio: 0.43). |
+| **Diagnosis** | Examined the Topdown and Memory Access recipes | The bottleneck is **TLB misses**: ~250,000 small pages for a 1 GB dataset, but the TLB can only track ~48 at a time. Random lookups constantly miss. |
+| **Optimisation** | Enabled THP and `defrag`, restarted Redis with `--disable-thp no` | **DTLB misses drop by 68%**, page table walks drop by 60%. Backend Bound falls from 63% to 58%. Throughput improves by ~13%. |
 
-| Step | What you did | What you learned |
-|------|-------------|------------------|
-| **Baseline** | ~1M keys with 1 KB values, default 4 KB pages, THP disabled | Redis is **Backend Bound** — the CPU waits for memory, with TLB misses contributing to the stall |
-| **Huge pages** | Enabled THP, started Redis with `--disable-thp no` | TLB misses drop by ~65%, page table walks drop by ~67% |
+### The profile → diagnose → fix → confirm loop
 
-### Why this matters
+This tutorial followed the same workflow as the earlier tutorials:
 
-Redis is single-threaded — it cannot speed up by using more CPU cores. When the dataset is large, the only way to go faster is to make each memory access more efficient. Huge pages do exactly this by reducing the overhead of translating memory addresses.
+1. **Profile** the workload with ATP to see where the CPU spends its time
+2. **Diagnose** the root cause by drilling into the relevant recipe (Memory Access → Data TLB)
+3. **Fix** the problem with a targeted change (huge pages to reduce TLB pressure)
+4. **Confirm** the fix by re-profiling and checking that the specific metrics improved
 
-This is a common pattern for in-memory workloads on Arm: the application code is already efficient, but the **operating system's memory configuration** is the bottleneck. ATP's Memory Access recipe gives you the evidence to find these problems and confirm that your changes worked.
+The key insight is that the fix was not in the application code — Redis itself is already highly optimised. The bottleneck was in the **operating system's memory configuration**. Without ATP, this would have been very difficult to identify. The Topdown recipe pointed to a memory problem, and the Memory Access recipe pinpointed TLB misses as the specific cause.
 
 ### File reference
 
