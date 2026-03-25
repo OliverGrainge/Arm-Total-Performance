@@ -20,7 +20,7 @@ $$d(\mathbf{q}, \mathbf{x}) = \sum_{i=1}^{512} (q_i - x_i)^2$$
 
 The smaller the distance, the better the match. Searching for matching images becomes: *find the vectors in the database with the smallest distance to the query vector*.
 
-With 50,000 images, computing this sum against every single vector (brute force) is too slow. Instead, the application stores the embeddings in [pgvector](https://github.com/pgvector/pgvector), a PostgreSQL extension that adds vector similarity search. pgvector builds an **HNSW index** (Hierarchical Navigable Small World) — a graph connecting similar vectors as neighbors — so queries can find the closest matches by walking the graph rather than scanning every vector.
+With 50,000 images, comparing against every single vector would be too slow. Instead, the application uses [pgvector](https://github.com/pgvector/pgvector) — a PostgreSQL extension for vector similarity search. pgvector builds an **HNSW index** (Hierarchical Navigable Small World), which you can think of as a graph where similar vectors are connected as neighbors. Instead of checking all 50,000 vectors, a query walks this graph — hopping from neighbor to neighbor — to quickly zero in on the closest matches.
 
 ### Architecture
 
@@ -41,15 +41,18 @@ A single interactive query returns in milliseconds. But the backend that handles
 
 ## Terms used in this tutorial
 
-- **CLIP**: Contrastive Language-Image Pre-training — a neural network that maps images and text into a shared vector space. Similar concepts have nearby vectors regardless of whether they originated as an image or text.
-- **Vector / Embedding**: A fixed-length list of numbers (512 floats in this tutorial) representing an image or text query.
-- **pgvector**: An open-source PostgreSQL extension that adds vector data types and similarity search operators. See [github.com/pgvector/pgvector](https://github.com/pgvector/pgvector).
-- **HNSW**: Hierarchical Navigable Small World — a graph-based approximate nearest-neighbor algorithm. pgvector uses this as its primary index type.
-- **`<->` operator**: The pgvector L2 distance operator. `ORDER BY embedding <-> query` sorts results by Euclidean distance.
-- **ef_search**: The size of the dynamic candidate list during HNSW search. Larger values explore more candidates (higher recall, slower queries).
-- **Huge Pages**: A Linux memory feature that uses 2 MB pages instead of the default 4 KB. Reduces TLB (Translation Lookaside Buffer) misses for workloads with large memory footprints.
-- **TLB**: Translation Lookaside Buffer — a CPU cache that stores recent virtual-to-physical address translations. TLB misses are expensive because they require a page table walk.
-- **shared_buffers**: PostgreSQL's main memory cache for table and index data. Stored in shared memory, allocated at startup.
+| Term | What it means |
+|------|---------------|
+| **CLIP** | A neural network that maps images and text into a shared space of numbers. Similar concepts get similar numbers, whether they started as an image or as text. |
+| **Vector / Embedding** | A fixed-length list of numbers (512 floats here) that represents an image or text query. |
+| **pgvector** | An open-source PostgreSQL extension that adds vector data types and similarity search. See [github.com/pgvector/pgvector](https://github.com/pgvector/pgvector). |
+| **HNSW** | Hierarchical Navigable Small World — a graph-based search algorithm. Think of it as a web of connections between similar vectors, so you can find nearest neighbors by walking the graph instead of scanning everything. |
+| **`<->` operator** | The pgvector L2 distance operator. `ORDER BY embedding <-> query` sorts results by distance. |
+| **ef_search** | Controls how thoroughly HNSW explores the graph during search. Higher = more accurate but slower. |
+| **Page** | The operating system divides memory into fixed-size chunks called "pages". The default size is 4 KB (4,096 bytes). |
+| **Huge Pages** | A Linux feature that uses 2 MB pages instead of the default 4 KB. This matters a lot for large memory regions, as explained in Step 5. |
+| **TLB** | Translation Lookaside Buffer — a small, fast cache inside the CPU that remembers where recently used memory pages are physically located. Think of it as a quick-reference address book. When the address is not in the book (a "TLB miss"), the CPU must do a slow lookup called a "page table walk". |
+| **shared_buffers** | PostgreSQL's main memory cache for table and index data. This is where your vector data lives in memory. |
 
 ---
 
@@ -162,7 +165,7 @@ Record this baseline throughput. You will compare it against the optimised confi
 
 ## Step 5: Profile the baseline with ATP
 
-While the benchmark runs, PostgreSQL does the real work: the `postgres` backend process traverses the HNSW graph, computes L2 distances over 512-dimensional vectors, and manages shared memory buffers. This is the process you will profile with ATP.
+While the benchmark runs, PostgreSQL does the real work: the `postgres` backend process walks the HNSW graph, computes distances between vectors, and reads data from shared memory. This is the process you will profile with ATP.
 
 ### Record the workload with ATP
 
@@ -184,33 +187,44 @@ In the Topdown summary, look at the four buckets:
 <img src="assets/baseline_topdown.png" width="850" alt="Topdown summary for baseline — Backend Bound elevated with Memory Bound component"/>
 </p>
 
-You should see **Backend Bound** accounting for a significant share of execution slots, with the **Memory Bound** sub-category being a major contributor. This indicates the CPU is spending a large fraction of its time waiting for data from memory.
+You should see **Backend Bound** accounting for a significant share of execution slots, with the **Memory Bound** sub-category being a major contributor. In plain terms: the CPU is spending a lot of its time *waiting for data from memory* rather than doing useful computation.
 
-### Drill into memory: TLB stalls
+### Drill into memory: understanding TLB stalls
 
-Select the **Memory Access** recipe in ATP. Look at:
+Now select the **Memory Access** recipe in ATP. Look at three key metrics:
 
-- **DTLB walk cycles** — time spent on page table walks after TLB misses
-- **L1D cache hit rate** — the fraction of loads satisfied by L1 cache
-- **Average load latency** — mean cycles per load
+- **DTLB walk cycles** — time the CPU spends looking up memory addresses after its quick-reference cache (the TLB) misses
+- **L1D cache hit rate** — how often data is found in the CPU's fastest cache
+- **Average load latency** — how many CPU cycles each memory read takes on average
 
 <p align="center">
 <img src="assets/baseline_memory_access.png" width="850" alt="Memory Access metrics — elevated TLB walk cycles"/>
 </p>
 
-The critical signal is **elevated DTLB walk cycles**. Here is why:
+The critical finding is **elevated DTLB walk cycles**. Here is what is happening and why it matters:
 
-PostgreSQL allocates its `shared_buffers` as a large shared memory segment. With the default configuration, this memory uses standard 4 KB pages. The pgvector HNSW index stores 50,000 × 512-dim vectors (~100 MB) plus the graph structure in shared buffers. During search, the backend follows graph edges, jumping between vectors that are spread across this memory region.
+#### The address book analogy
 
-Each 512-dim vector occupies 2,048 bytes. With 4 KB pages, each vector spans roughly half a page. The L1 data TLB on Graviton caches a limited number of page translations (typically 48 entries for 4 KB pages). As the HNSW search hops between distant nodes in the graph, each hop accesses a different page, and the TLB cannot hold translations for all the pages being visited. The result is frequent TLB misses, each requiring an expensive page table walk.
+To understand this bottleneck, think of memory like a library with thousands of bookshelves. The CPU needs to know the physical location of each "shelf" (memory page) it wants to read. It keeps a small, fast address book — the **TLB** — that maps page addresses. This address book can only hold about 48 entries.
 
-**Diagnosis: Backend Bound → Memory Bound → TLB stalls. The HNSW graph traversal accesses vectors spread across ~100 MB of shared memory using 4 KB pages, causing frequent TLB misses. The fix is to use huge pages (2 MB), which reduces the number of TLB entries needed by 512×.**
+Now consider the problem:
+
+- PostgreSQL stores the HNSW index (all 50,000 vectors and their graph connections — about 100 MB of data) in its `shared_buffers` memory region.
+- With the default configuration, this memory is divided into **4 KB pages**. That means ~25,000 pages to cover 100 MB.
+- The TLB can only remember the locations of ~48 pages at a time.
+- During an HNSW search, PostgreSQL hops between vectors that are scattered across this memory. Each hop likely lands on a *different* page.
+
+Since the TLB can only track 48 pages but the search needs to access thousands of different pages, it constantly overflows. Every overflow (a "TLB miss") forces the CPU to do a slow, multi-step lookup called a **page table walk** — like having to look up an address in a filing cabinet instead of your quick-reference card.
+
+#### The diagnosis
+
+**Backend Bound -> Memory Bound -> TLB stalls.** The HNSW graph traversal accesses vectors spread across ~100 MB of shared memory. With 4 KB pages, the TLB cannot keep up. The fix: use **huge pages** (2 MB each), which cover 512x more memory per entry, so the TLB can track the entire memory region comfortably.
 
 ---
 
-## Step 6: Optimisation — PostgreSQL memory tuning
+## Step 6: Optimisation 1 — PostgreSQL memory tuning
 
-Before enabling huge pages, first ensure PostgreSQL is configured to make good use of memory. The default configuration is very conservative.
+Before enabling huge pages, first ensure PostgreSQL is configured to make good use of memory. The default configuration is very conservative — it was designed to work on machines with as little as 256 MB of RAM.
 
 ### Check current settings
 
@@ -233,7 +247,7 @@ Edit the PostgreSQL configuration:
 sudo nano /var/lib/pgsql/data/postgresql.conf
 ```
 
-Set:
+Set these four values:
 
 ```
 shared_buffers = 512MB
@@ -242,13 +256,16 @@ effective_cache_size = 2GB
 maintenance_work_mem = 256MB
 ```
 
-**Why these values:**
-- `shared_buffers = 512MB` — large enough to hold the entire pgvector index (~100 MB vectors + graph structure) comfortably in shared memory, with room for the table data
-- `work_mem = 128MB` — allows each query to sort and process candidates without spilling to disk
-- `effective_cache_size = 2GB` — tells the query planner how much OS page cache is available
-- `maintenance_work_mem = 256MB` — speeds up index rebuilds and VACUUM operations
+**What each setting does and why we are changing it:**
 
-Restart PostgreSQL:
+| Setting | Default | New value | Why |
+|---------|---------|-----------|-----|
+| `shared_buffers` | 128 MB | 512 MB | This is PostgreSQL's own data cache. The pgvector index is ~100 MB, plus the table data. At 128 MB, there's barely room and data gets evicted. At 512 MB, the entire index stays comfortably in memory. |
+| `work_mem` | 4 MB | 128 MB | Memory available per query for sorting and processing. The HNSW search builds a candidate list — more memory means it does not have to spill intermediate results to disk. |
+| `effective_cache_size` | 4 GB | 2 GB | This does not allocate memory — it just tells PostgreSQL's query planner how much total cache (shared_buffers + OS file cache) is available, so it can make better decisions about whether to use indexes. |
+| `maintenance_work_mem` | 64 MB | 256 MB | Memory for maintenance tasks like building indexes and VACUUM. Speeds up index rebuilds if you re-create the HNSW index. |
+
+Restart PostgreSQL to apply changes:
 
 ```bash
 sudo systemctl restart postgresql
@@ -260,25 +277,38 @@ sudo systemctl restart postgresql
 python scripts/benchmark.py
 ```
 
-You should see a moderate improvement in throughput. The shared_buffers increase ensures the index data stays resident in PostgreSQL's shared memory rather than relying on OS page cache, reducing some overhead. But the TLB problem persists — the memory is still mapped with 4 KB pages.
+You should see a moderate improvement in throughput. The bigger `shared_buffers` ensures the index data stays in PostgreSQL's own cache instead of relying on the OS page cache, which has more overhead to access. But the underlying TLB problem still exists — the memory is still divided into small 4 KB pages.
 
 ---
 
-## Step 7: Optimisation — Huge pages
+## Step 7: Optimisation 2 — Huge pages
 
-This is the key kernel-level optimisation. Huge pages use 2 MB pages instead of 4 KB, reducing the number of TLB entries needed to cover the shared memory segment by 512×.
+This is the key optimisation, directly targeting the TLB bottleneck that ATP revealed.
 
-### Calculate the required number of huge pages
+### Why huge pages fix the problem
 
-PostgreSQL's `shared_buffers` (512 MB) is the main consumer. Add some overhead for PostgreSQL internals:
+Recall the address book analogy from Step 5. The TLB can hold ~48 entries. With standard 4 KB pages:
+
+- 512 MB of shared_buffers = **131,072 pages** to track
+- The TLB can hold **48** of them at a time
+- Result: constant TLB misses, constant slow page table walks
+
+With 2 MB huge pages:
+
+- 512 MB of shared_buffers = **256 pages** to track
+- The TLB can hold **48** of them at a time — that covers nearly the entire region
+- Result: far fewer TLB misses, the CPU spends its time computing instead of waiting
+
+### Step 7a: Reserve huge pages in the kernel
+
+The kernel needs to set aside 2 MB pages in advance. We need enough for PostgreSQL's `shared_buffers` (512 MB) plus a small overhead:
 
 ```bash
-# Required huge pages = shared_buffers / 2MB + overhead
-# 512MB / 2MB = 256, plus ~20 for overhead
+# 512 MB / 2 MB = 256 pages, plus ~24 for PostgreSQL internals
 echo 280 | sudo tee /proc/sys/vm/nr_hugepages
 ```
 
-Verify:
+Verify the pages were reserved:
 
 ```bash
 cat /proc/meminfo | grep HugePages
@@ -286,15 +316,15 @@ cat /proc/meminfo | grep HugePages
 
 You should see `HugePages_Total: 280` and `HugePages_Free: 280` (or close to it).
 
-### Configure PostgreSQL to use huge pages
+### Step 7b: Tell PostgreSQL to use huge pages
 
-Edit the configuration again:
+Edit the configuration:
 
 ```bash
 sudo nano /var/lib/pgsql/data/postgresql.conf
 ```
 
-Set:
+Add this line:
 
 ```
 huge_pages = on
@@ -306,9 +336,11 @@ Restart PostgreSQL:
 sudo systemctl restart postgresql
 ```
 
-> **Troubleshooting:** If PostgreSQL fails to start, it means there are not enough free huge pages. Increase `nr_hugepages` or free memory by stopping other services. Check logs with `sudo journalctl -u postgresql`.
+> **Troubleshooting:** If PostgreSQL fails to start, it could not get enough huge pages. This usually means the system could not allocate them because memory is fragmented. Try increasing `nr_hugepages` or freeing memory by stopping other services. Check logs with `sudo journalctl -u postgresql`.
 
-### Make huge pages persistent across reboots
+### Step 7c: Make huge pages survive reboots
+
+The `echo` command above only lasts until the next reboot. To make it permanent:
 
 ```bash
 echo "vm.nr_hugepages = 280" | sudo tee -a /etc/sysctl.conf
@@ -321,11 +353,11 @@ sudo sysctl -p
 python scripts/benchmark.py
 ```
 
-You should see a noticeable improvement in throughput. The TLB now needs far fewer entries to cover the same shared memory region, so page table walks are dramatically reduced.
+You should see a noticeable improvement in throughput. The TLB can now cover the shared memory region with far fewer entries, so the CPU spends less time on page table walks and more time on actual vector distance computation.
 
 ---
 
-## Step 8: Re-profile with ATP
+## Step 8: Re-profile with ATP — confirming the fix
 
 Repeat the profiling process from Step 5 with huge pages enabled. Start the benchmark, attach ATP to the postgres backend, and capture a new recording.
 
@@ -335,12 +367,12 @@ Repeat the profiling process from Step 5 with huge pages enabled. Start the benc
 <img src="assets/hugepages_topdown.png" width="850" alt="Topdown after huge pages — Backend Bound reduced"/>
 </p>
 
-| Bucket        | Baseline | After Huge Pages |
-|---------------|----------|------------------|
-| Backend Bound | High     | Lower            |
-| Retiring      | Low      | Higher           |
+| Bucket        | Baseline | After Huge Pages | What this means |
+|---------------|----------|------------------|-----------------|
+| Backend Bound | High     | Lower            | Less time waiting for memory |
+| Retiring      | Low      | Higher           | More time doing useful work |
 
-The shift from Backend Bound to Retiring indicates the CPU is spending more time doing useful work (distance computation, graph traversal) and less time stalled on TLB misses.
+The shift from Backend Bound to Retiring is the confirmation: the CPU is now spending more of its time on actual computation (distance calculations, graph traversal) and less time stalled waiting for address translations.
 
 ### Memory Access comparison
 
@@ -348,27 +380,27 @@ The shift from Backend Bound to Retiring indicates the CPU is spending more time
 <img src="assets/hugepages_memory_access.png" width="850" alt="Memory Access after huge pages — TLB walk cycles reduced"/>
 </p>
 
-| Metric             | Baseline  | After Huge Pages |
-|--------------------|-----------|------------------|
-| DTLB walk cycles   | High      | Dramatically lower |
-| L1D hit rate       | ~85–90%   | ~92–97%          |
-| Avg load latency   | Higher    | Lower            |
+| Metric             | Baseline  | After Huge Pages | What changed |
+|--------------------|-----------|------------------|--------------|
+| DTLB walk cycles   | High      | Dramatically lower | Far fewer TLB misses — the "address book" can now cover the data |
+| L1D hit rate       | ~85-90%   | ~92-97%          | With fewer TLB stalls, the caches work more effectively |
+| Avg load latency   | Higher    | Lower            | Each memory read completes faster on average |
 
-The DTLB walk cycles should drop significantly. Each 2 MB huge page covers 512× more memory than a 4 KB page, so the TLB can now hold translations for the entire shared_buffers region in far fewer entries.
+This confirms the diagnosis from Step 5: the TLB bottleneck was real, and huge pages resolved it.
 
 ---
 
 ## Summary
 
-You started with a real text-to-image search application — 50,000 CIFAR-100 images indexed by 512-dimensional CLIP embeddings in pgvector on PostgreSQL — and used ATP to diagnose and fix a memory bottleneck in the search backend:
+You started with a text-to-image search application — 50,000 images indexed by CLIP embeddings in pgvector — and used ATP to find and fix a memory bottleneck:
 
-| Step | What you did | ATP Recipe | What ATP revealed |
-|------|-------------|------------|-------------------|
-| Baseline | Default PostgreSQL config, 4 KB pages | Topdown + Memory Access | Backend Bound → Memory Bound → TLB stalls from 4 KB pages over ~100 MB of vector data |
-| Memory tuning | `shared_buffers = 512MB`, `work_mem = 128MB` | — | Ensures index data stays in shared memory |
-| Huge pages | `huge_pages = on`, `vm.nr_hugepages = 280` | Topdown + Memory Access | TLB walk cycles drop, Backend Bound reduces, Retiring increases |
+| Step | What you did | What ATP showed |
+|------|-------------|-----------------|
+| **Baseline** | Default PostgreSQL config, 4 KB pages | CPU is memory-bound, spending too much time on TLB misses (address lookups) |
+| **Memory tuning** | Increased `shared_buffers` to 512 MB | Keeps the index in PostgreSQL's cache (moderate improvement, TLB issue remains) |
+| **Huge pages** | Switched to 2 MB pages | TLB can now cover the data region — address lookup stalls disappear |
 
-The optimisation followed the same loop as the earlier tutorials: **profile → diagnose → fix → re-profile**. The difference is that this time the fix was not in source code but in **kernel and database configuration** — a common pattern when optimising production workloads on Arm.
+The optimisation followed the same loop as the earlier tutorials: **profile -> diagnose -> fix -> re-profile**. The difference is that this time the fix was not in source code but in **kernel and database configuration** — a common pattern when optimising production workloads on Arm.
 
 ### File reference
 
@@ -380,4 +412,4 @@ The optimisation followed the same loop as the earlier tutorials: **profile → 
 
 ### Key takeaway
 
-Not all performance bottlenecks live in source code. When you deploy applications on Arm — especially database-backed services with large in-memory data structures — kernel-level configuration like huge pages can have a significant impact on throughput. ATP's Memory Access recipe gives you the evidence to identify TLB-related bottlenecks and verify that your kernel configuration changes actually resolved them.
+Not all performance bottlenecks live in source code. When you deploy applications on Arm — especially database-backed services with large in-memory data structures — kernel-level configuration like huge pages can have a dramatic impact on throughput. ATP's Memory Access recipe gives you the evidence to identify these bottlenecks and verify that your configuration changes actually resolved them.
