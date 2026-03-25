@@ -56,42 +56,36 @@ A single interactive query returns in milliseconds. But the backend that handles
 ## Step 1: Install PostgreSQL and pgvector
 
 ```bash
-sudo apt update
-sudo apt install -y postgresql postgresql-server-dev-16
+sudo dnf install -y postgresql16-server postgresql16-server-devel postgresql16-contrib
 ```
 
-Install the pgvector extension:
+Initialise the database cluster (first time only) and start PostgreSQL:
 
 ```bash
-sudo apt install -y postgresql-16-pgvector
-```
-
-> **Note:** If your distribution does not package pgvector, you can build it from source:
-> ```bash
-> git clone https://github.com/pgvector/pgvector.git
-> cd pgvector
-> make
-> sudo make install
-> ```
-
-Start PostgreSQL and create a user for your Linux account:
-
-```bash
+sudo postgresql-setup --initdb
 sudo systemctl start postgresql
 sudo systemctl enable postgresql
+```
+
+Create a superuser for your Linux account:
+
+```bash
 sudo -u postgres createuser --superuser $USER
+```
+
+Install the pgvector extension from source:
+
+```bash
+git clone --branch v0.8.0 https://github.com/pgvector/pgvector.git
+cd pgvector
+make PG_CONFIG=/usr/bin/pg_config
+sudo make install PG_CONFIG=/usr/bin/pg_config
+cd .. && rm -rf pgvector
 ```
 
 ---
 
 ## Step 2: Set up the data
-
-### Install Python dependencies
-
-```bash
-cd tutorial_6
-pip install -r requirements.txt
-```
 
 ### Generate CLIP embeddings and load into pgvector
 
@@ -236,7 +230,7 @@ The defaults are typically:
 Edit the PostgreSQL configuration:
 
 ```bash
-sudo nano /etc/postgresql/16/main/postgresql.conf
+sudo nano /var/lib/pgsql/data/postgresql.conf
 ```
 
 Set:
@@ -297,7 +291,7 @@ You should see `HugePages_Total: 280` and `HugePages_Free: 280` (or close to it)
 Edit the configuration again:
 
 ```bash
-sudo nano /etc/postgresql/16/main/postgresql.conf
+sudo nano /var/lib/pgsql/data/postgresql.conf
 ```
 
 Set:
@@ -383,7 +377,6 @@ The optimisation followed the same loop as the earlier tutorials: **profile → 
 | `scripts/setup_data.py` | Downloads CIFAR-100, generates CLIP embeddings, loads into pgvector |
 | `scripts/benchmark.py` | Runs batch queries against pgvector and reports throughput |
 | `dashboard/app.py` | Gradio dashboard for interactive text-to-image search |
-| `requirements.txt` | Python dependencies |
 
 ### Key takeaway
 
