@@ -46,3 +46,5 @@ Thumbs.db
 # data 
 *.bin
 *.docx
+*.npy
+class_names.txt

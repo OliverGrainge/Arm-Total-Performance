@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
-"""Download CIFAR-100 and generate CLIP embeddings for the image search tutorial.
+"""Download CIFAR-100, generate CLIP embeddings, and load into PostgreSQL with pgvector.
 
 This script:
   1. Downloads the CIFAR-100 dataset (~170 MB)
-  2. Loads a CLIP ViT-L/14 model via open_clip
-  3. Extracts 768-dimensional embeddings for all images
-  4. Computes brute-force groundtruth for recall measurement
-  5. Saves binary files for the C++ search programs and the dashboard
+  2. Loads a CLIP ViT-B-32 model and extracts 512-dimensional embeddings
+  3. Creates a PostgreSQL database and loads the embeddings into pgvector
+  4. Saves image arrays and metadata for the dashboard
 
 Requirements:
-    pip install torch open-clip-torch Pillow numpy
+    pip install -r requirements.txt
+    sudo apt install postgresql postgresql-16-pgvector   # on Ubuntu/Graviton
 """
 
 import argparse
 import os
 import pickle
-import sys
 import tarfile
 import urllib.request
 
@@ -38,7 +37,7 @@ def download_cifar100(data_dir):
 
     print("Extracting...")
     with tarfile.open(archive_path) as tar:
-        tar.extractall(data_dir)
+        tar.extractall(data_dir, filter="data")
 
     os.remove(archive_path)
     return extract_dir
@@ -51,7 +50,6 @@ def load_cifar100(extract_dir):
     with open(os.path.join(extract_dir, "test"), "rb") as f:
         test = pickle.load(f, encoding="bytes")
 
-    # CIFAR-100 stores images as (N, 3072) uint8 in CHW order
     train_images = train[b"data"].reshape(-1, 3, 32, 32).transpose(0, 2, 3, 1)
     test_images = test[b"data"].reshape(-1, 3, 32, 32).transpose(0, 2, 3, 1)
     train_labels = np.array(train[b"fine_labels"], dtype=np.int32)
@@ -71,9 +69,8 @@ def generate_clip_embeddings(images, model_name="ViT-B-32", batch_size=64):
     import open_clip
     from PIL import Image
 
-    device = "cpu"
     model, _, preprocess = open_clip.create_model_and_transforms(
-        model_name, pretrained="openai", device=device
+        model_name, pretrained="openai", device="cpu"
     )
     model.eval()
 
@@ -86,68 +83,97 @@ def generate_clip_embeddings(images, model_name="ViT-B-32", batch_size=64):
             batch_pil = [Image.fromarray(img) for img in images[start:end]]
             batch_tensor = torch.stack(
                 [preprocess(img) for img in batch_pil]
-            ).to(device)
+            )
             features = model.encode_image(batch_tensor)
             features = features / features.norm(dim=-1, keepdim=True)
             embeddings.append(features.cpu().numpy())
-
-            print(f"\r  Embedding: {end}/{n}", end="", flush=True)
+            print(f"\r  {end}/{n}", end="", flush=True)
 
     print()
     return np.vstack(embeddings).astype(np.float32)
 
 
-def compute_groundtruth(base, queries, k):
-    """Brute-force exact k-NN using L2 distance."""
-    n_queries = queries.shape[0]
-    gt = np.empty((n_queries, k), dtype=np.int32)
-    batch = 256
+def load_into_pgvector(embeddings, labels, class_names, db_name):
+    """Create a PostgreSQL database and load embeddings with pgvector."""
+    import psycopg2
 
-    for start in range(0, n_queries, batch):
-        end = min(start + batch, n_queries)
-        q = queries[start:end]
-        dists = (
-            np.sum(q ** 2, axis=1, keepdims=True)
-            + np.sum(base ** 2, axis=1, keepdims=False)
-            - 2.0 * q @ base.T
+    # Connect to default database to create ours
+    conn = psycopg2.connect(dbname="postgres")
+    conn.autocommit = True
+    cur = conn.cursor()
+    cur.execute(f"DROP DATABASE IF EXISTS {db_name}")
+    cur.execute(f"CREATE DATABASE {db_name}")
+    cur.close()
+    conn.close()
+
+    # Connect to the new database
+    conn = psycopg2.connect(dbname=db_name)
+    cur = conn.cursor()
+
+    cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+
+    dim = embeddings.shape[1]
+
+    cur.execute(f"""
+        CREATE TABLE images (
+            id SERIAL PRIMARY KEY,
+            label TEXT NOT NULL,
+            embedding vector({dim})
         )
-        gt[start:end] = np.argpartition(dists, k, axis=1)[:, :k]
+    """)
 
-        if (start // batch) % 5 == 0:
-            print(f"\r  Groundtruth: {end}/{n_queries}", end="", flush=True)
-
+    # Bulk insert in batches
+    print("Loading embeddings into PostgreSQL...")
+    batch_size = 500
+    n = len(embeddings)
+    for start in range(0, n, batch_size):
+        end = min(start + batch_size, n)
+        values = []
+        for i in range(start, end):
+            label = class_names[labels[i]]
+            emb_str = "[" + ",".join(f"{x:.6f}" for x in embeddings[i]) + "]"
+            values.append(cur.mogrify("(%s, %s::vector)", (label, emb_str)).decode())
+        cur.execute(
+            "INSERT INTO images (label, embedding) VALUES " + ",".join(values)
+        )
+        conn.commit()
+        print(f"\r  {end}/{n}", end="", flush=True)
     print()
-    return gt
+
+    # Build HNSW index
+    print("Building HNSW index (this may take a few minutes)...")
+    cur.execute(f"""
+        CREATE INDEX ON images
+        USING hnsw (embedding vector_l2_ops)
+        WITH (m = 16, ef_construction = 200)
+    """)
+    conn.commit()
+
+    # Verify
+    cur.execute("SELECT COUNT(*) FROM images")
+    count = cur.fetchone()[0]
+    print(f"Loaded {count} vectors into pgvector database '{db_name}'")
+
+    cur.close()
+    conn.close()
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Download CIFAR-100 and generate CLIP embeddings"
+        description="Download CIFAR-100, generate CLIP embeddings, load into pgvector"
     )
-    parser.add_argument(
-        "--output_dir", type=str, default="data",
-        help="Output directory (default: data)"
-    )
-    parser.add_argument(
-        "--k", type=int, default=10,
-        help="Top-K for groundtruth (default: 10)"
-    )
-    parser.add_argument(
-        "--model", type=str, default="ViT-B-32",
-        help="CLIP model name (default: ViT-B-32, alt: ViT-L-14)"
-    )
-    parser.add_argument(
-        "--batch_size", type=int, default=64,
-        help="CLIP inference batch size (default: 64)"
-    )
+    parser.add_argument("--data-dir", default="data", help="Output directory (default: data)")
+    parser.add_argument("--db-name", default="clip_search", help="PostgreSQL database name")
+    parser.add_argument("--model", default="ViT-B-32", help="CLIP model name")
+    parser.add_argument("--batch-size", type=int, default=64, help="CLIP inference batch size")
     args = parser.parse_args()
 
-    os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(args.data_dir, exist_ok=True)
 
-    # ── Step 1: Download CIFAR-100 ──────────────────────────────────────
-    extract_dir = download_cifar100(args.output_dir)
+    # Step 1: Download CIFAR-100
+    extract_dir = download_cifar100(args.data_dir)
 
-    # ── Step 2: Load images ─────────────────────────────────────────────
+    # Step 2: Load images
     print("Loading CIFAR-100 images...")
     train_imgs, train_labels, test_imgs, test_labels, class_names = (
         load_cifar100(extract_dir)
@@ -155,73 +181,50 @@ def main():
     print(f"  Train: {len(train_imgs)} images  (database)")
     print(f"  Test:  {len(test_imgs)} images  (queries)")
 
-    # ── Step 3: Generate CLIP embeddings ────────────────────────────────
-    model_name = args.model
-    print(f"\nGenerating CLIP {model_name} embeddings "
-          "(this may take a few minutes on CPU)...\n")
+    # Step 3: Generate CLIP embeddings (or load if already saved)
+    emb_path = os.path.join(args.data_dir, "embeddings.npy")
+    query_emb_path = os.path.join(args.data_dir, "query_embeddings.npy")
 
-    print("Database embeddings (train set):")
-    base_emb = generate_clip_embeddings(
-        train_imgs, model_name=model_name, batch_size=args.batch_size
-    )
-
-    print("Query embeddings (test set):")
-    query_emb = generate_clip_embeddings(
-        test_imgs, model_name=model_name, batch_size=args.batch_size
-    )
+    if os.path.exists(emb_path) and os.path.exists(query_emb_path):
+        print("Embeddings already generated, loading from disk...")
+        base_emb = np.load(emb_path)
+        query_emb = np.load(query_emb_path)
+    else:
+        print(f"\nGenerating CLIP {args.model} embeddings (may take a few minutes on CPU)...\n")
+        print("Database embeddings (train set):")
+        base_emb = generate_clip_embeddings(
+            train_imgs, model_name=args.model, batch_size=args.batch_size
+        )
+        print("Query embeddings (test set):")
+        query_emb = generate_clip_embeddings(
+            test_imgs, model_name=args.model, batch_size=args.batch_size
+        )
+        np.save(emb_path, base_emb)
+        np.save(query_emb_path, query_emb)
 
     dim = base_emb.shape[1]
-    n_base = base_emb.shape[0]
-    n_query = query_emb.shape[0]
+    print(f"  Database: {base_emb.shape} ({base_emb.dtype})")
+    print(f"  Queries:  {query_emb.shape} ({query_emb.dtype})")
 
-    # ── Step 4: Compute groundtruth ─────────────────────────────────────
-    print(f"\nComputing exact top-{args.k} groundtruth (brute force)...")
-    gt = compute_groundtruth(base_emb, query_emb, args.k)
-
-    # ── Step 5: Save files ──────────────────────────────────────────────
-    print("\nSaving files...")
-
-    # Binary files consumed by the C++ search programs
-    base_emb.tofile(os.path.join(args.output_dir, "embeddings.bin"))
-    query_emb.tofile(os.path.join(args.output_dir, "queries.bin"))
-    gt.tofile(os.path.join(args.output_dir, "groundtruth.bin"))
-
-    # Numpy files consumed by the dashboard
-    np.save(os.path.join(args.output_dir, "images.npy"), train_imgs)
-    np.save(os.path.join(args.output_dir, "query_images.npy"), test_imgs)
-    np.save(os.path.join(args.output_dir, "labels.npy"), train_labels)
-    np.save(os.path.join(args.output_dir, "query_labels.npy"), test_labels)
-
-    with open(os.path.join(args.output_dir, "class_names.txt"), "w") as f:
+    # Step 4: Save images and labels for dashboard
+    np.save(os.path.join(args.data_dir, "images.npy"), train_imgs)
+    np.save(os.path.join(args.data_dir, "query_images.npy"), test_imgs)
+    np.save(os.path.join(args.data_dir, "labels.npy"), train_labels)
+    np.save(os.path.join(args.data_dir, "query_labels.npy"), test_labels)
+    with open(os.path.join(args.data_dir, "class_names.txt"), "w") as f:
         for name in class_names:
             f.write(name + "\n")
 
-    # C++ header so the search programs know the dimensions
-    header_path = os.path.join(args.output_dir, "data_config.h")
-    with open(header_path, "w") as f:
-        f.write("// Auto-generated by setup_data.py\n")
-        f.write("#pragma once\n")
-        f.write(f"#define DATA_N_BASE  {n_base}\n")
-        f.write(f"#define DATA_N_QUERY {n_query}\n")
-        f.write(f"#define DATA_DIM     {dim}\n")
-        f.write(f"#define DATA_K       {args.k}\n")
+    # Step 5: Save query embeddings as binary for benchmark
+    query_emb.tofile(os.path.join(args.data_dir, "queries.bin"))
 
-    base_mb = os.path.getsize(
-        os.path.join(args.output_dir, "embeddings.bin")
-    ) / (1024 * 1024)
-    query_mb = os.path.getsize(
-        os.path.join(args.output_dir, "queries.bin")
-    ) / (1024 * 1024)
+    # Step 6: Load into pgvector
+    load_into_pgvector(base_emb, train_labels, class_names, db_name=args.db_name)
 
-    print(f"\nWritten to {args.output_dir}/:")
-    print(f"  embeddings.bin     {n_base:>7,} x {dim}  ({base_mb:.1f} MB)")
-    print(f"  queries.bin        {n_query:>7,} x {dim}  ({query_mb:.1f} MB)")
-    print(f"  groundtruth.bin    {n_query:>7,} x {args.k}")
-    print(f"  images.npy         {n_base:>7,} x 32 x 32 x 3")
-    print(f"  query_images.npy   {n_query:>7,} x 32 x 32 x 3")
-    print(f"  data_config.h      (C++ header)")
-    print(f"\nEmbedding dimension: {dim} (CLIP {model_name})")
-    print("Done!")
+    print(f"\nSetup complete!")
+    print(f"  Database:  {args.db_name}")
+    print(f"  Vectors:   {base_emb.shape[0]} images, {query_emb.shape[0]} queries")
+    print(f"  Dimension: {dim}")
 
 
 if __name__ == "__main__":

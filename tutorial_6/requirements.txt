@@ -1,0 +1,9 @@
+# Data generation (run once on any machine)
+torch
+open-clip-torch
+Pillow
+numpy
+
+# Dashboard
+gradio
+psycopg2-binary
