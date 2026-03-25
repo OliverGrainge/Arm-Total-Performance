@@ -105,11 +105,19 @@ You should see `50000`.
 
 ## Step 3: Try the dashboard
 
+If you are connecting to your EC2 instance via SSH, use **port forwarding** so you can access the dashboard from your local browser. Connect with the `-L` flag:
+
+```bash
+ssh -L 7860:localhost:7860 -i "your-key.pem" ec2-user@<your-instance-ip>
+```
+
+Then start the dashboard:
+
 ```bash
 python3 dashboard/app.py
 ```
 
-Open the URL printed in the terminal. Type a description — "a red sports car", "sunset over the ocean", "a cute puppy" — and the dashboard returns the 10 most similar images from the database.
+Open `http://localhost:7860` in your local browser. Type a description — "a red sports car", "sunset over the ocean", "a cute puppy" — and the dashboard returns the 10 most similar images from the database.
 
 <p align="center">
 <img src="assets/image_search.gif" width="700" alt="Dashboard demo — typing a text query and retrieving matching images"/>
@@ -223,13 +231,11 @@ ATP showed us the CPU is **waiting on memory** too much, specifically because of
 ```bash
 psql clip_search -c "SHOW shared_buffers;"
 psql clip_search -c "SHOW work_mem;"
-psql clip_search -c "SHOW effective_cache_size;"
 ```
 
 The defaults are typically:
 - `shared_buffers = 128MB`
 - `work_mem = 4MB`
-- `effective_cache_size = 4GB`
 
 ### Tune PostgreSQL memory
 
@@ -239,12 +245,11 @@ Edit the PostgreSQL configuration:
 sudo nano /var/lib/pgsql/data/postgresql.conf
 ```
 
-Set these four values:
+Set these three values:
 
 ```
 shared_buffers = 512MB
 work_mem = 128MB
-effective_cache_size = 2GB
 maintenance_work_mem = 256MB
 ```
 
@@ -261,10 +266,6 @@ The image vectors and their index take up about 100 MB. With the default 128 MB,
 #### `work_mem`: 4 MB → 128 MB
 
 This controls how much memory each individual search query can use for temporary work (like sorting results). With only 4 MB, large searches may have to write temporary data to disk, which is slow. At 128 MB, searches can stay entirely in memory.
-
-#### `effective_cache_size`: 4 GB → 2 GB
-
-This does not actually use any memory — it just tells PostgreSQL how much total memory is available for caching on this machine. PostgreSQL uses this hint to make smarter decisions about how to run queries. We set it to a realistic value for our instance.
 
 #### `maintenance_work_mem`: 64 MB → 256 MB
 
@@ -346,15 +347,6 @@ sudo systemctl restart postgresql
 ```
 
 > **Troubleshooting:** If PostgreSQL fails to start, it means it could not get enough huge pages. This usually happens when the system's memory is too fragmented to carve out large 2 MB blocks. Try increasing the `nr_hugepages` number or free up memory by stopping other programs. You can check the error logs with `sudo journalctl -u postgresql`.
-
-### Step 7c: Keep huge pages after rebooting
-
-The command above only lasts until you restart the machine. To make it permanent:
-
-```bash
-echo "vm.nr_hugepages = 280" | sudo tee -a /etc/sysctl.conf
-sudo sysctl -p
-```
 
 ### Re-benchmark
 
