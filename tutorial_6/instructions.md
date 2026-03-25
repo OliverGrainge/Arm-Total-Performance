@@ -43,12 +43,6 @@ A single interactive query returns in milliseconds. But the backend that handles
 
 | Term | What it means |
 |------|---------------|
-| **CLIP** | A neural network that maps images and text into a shared space of numbers. Similar concepts get similar numbers, whether they started as an image or as text. |
-| **Vector / Embedding** | A fixed-length list of numbers (512 floats here) that represents an image or text query. |
-| **pgvector** | An open-source PostgreSQL extension that adds vector data types and similarity search. See [github.com/pgvector/pgvector](https://github.com/pgvector/pgvector). |
-| **HNSW** | Hierarchical Navigable Small World — a graph-based search algorithm. Think of it as a web of connections between similar vectors, so you can find nearest neighbors by walking the graph instead of scanning everything. |
-| **`<->` operator** | The pgvector L2 distance operator. `ORDER BY embedding <-> query` sorts results by distance. |
-| **ef_search** | Controls how thoroughly HNSW explores the graph during search. Higher = more accurate but slower. |
 | **Page** | The operating system divides memory into fixed-size chunks called "pages". The default size is 4 KB (4,096 bytes). |
 | **Huge Pages** | A Linux feature that uses 2 MB pages instead of the default 4 KB. This matters a lot for large memory regions, as explained in Step 5. |
 | **TLB** | Translation Lookaside Buffer — a small, fast cache inside the CPU that remembers where recently used memory pages are physically located. Think of it as a quick-reference address book. When the address is not in the book (a "TLB miss"), the CPU must do a slow lookup called a "page table walk". |
@@ -93,7 +87,7 @@ cd .. && rm -rf pgvector
 ### Generate CLIP embeddings and load into pgvector
 
 ```bash
-python scripts/setup_data.py
+python3 scripts/setup_data.py
 ```
 
 This script:
@@ -116,7 +110,7 @@ You should see `50000`.
 ## Step 3: Try the dashboard
 
 ```bash
-python dashboard/app.py
+python3 dashboard/app.py
 ```
 
 Open the URL printed in the terminal. Type a description — "a red sports car", "sunset over the ocean", "a cute puppy" — and the dashboard returns the 10 most similar images from the database.
@@ -134,7 +128,7 @@ The search feels instant. But behind that single query is an HNSW index over 50,
 The benchmark script sends 10,000 nearest-neighbor queries to pgvector and reports throughput:
 
 ```bash
-python scripts/benchmark.py
+python3 scripts/benchmark.py
 ```
 
 Expected output (timings vary by instance):
@@ -172,7 +166,7 @@ While the benchmark runs, PostgreSQL does the real work: the `postgres` backend 
 Start the benchmark in one terminal:
 
 ```bash
-python scripts/benchmark.py
+python3 scripts/benchmark.py
 ```
 
 In ATP, select **Attach to Process** and choose the `postgres` backend process connected to the `clip_search` database. Start recording and let it capture for at least 30 seconds while the benchmark runs.
@@ -224,7 +218,7 @@ Since the TLB can only track 48 pages but the search needs to access thousands o
 
 ## Step 6: Optimisation 1 — PostgreSQL memory tuning
 
-Before enabling huge pages, first ensure PostgreSQL is configured to make good use of memory. The default configuration is very conservative — it was designed to work on machines with as little as 256 MB of RAM.
+ATP told us the CPU is **memory-bound**, spending too much time on TLB misses while traversing the HNSW index. The fix is huge pages (Step 7), but huge pages only help memory that PostgreSQL *directly manages* — its `shared_buffers` region. If the index data doesn't fit in `shared_buffers`, PostgreSQL falls back to reading through the OS page cache, which huge pages do not cover. So the first step is to make sure `shared_buffers` is large enough to hold the entire index.
 
 ### Check current settings
 
@@ -258,12 +252,27 @@ maintenance_work_mem = 256MB
 
 **What each setting does and why we are changing it:**
 
-| Setting | Default | New value | Why |
-|---------|---------|-----------|-----|
-| `shared_buffers` | 128 MB | 512 MB | This is PostgreSQL's own data cache. The pgvector index is ~100 MB, plus the table data. At 128 MB, there's barely room and data gets evicted. At 512 MB, the entire index stays comfortably in memory. |
-| `work_mem` | 4 MB | 128 MB | Memory available per query for sorting and processing. The HNSW search builds a candidate list — more memory means it does not have to spill intermediate results to disk. |
-| `effective_cache_size` | 4 GB | 2 GB | This does not allocate memory — it just tells PostgreSQL's query planner how much total cache (shared_buffers + OS file cache) is available, so it can make better decisions about whether to use indexes. |
-| `maintenance_work_mem` | 64 MB | 256 MB | Memory for maintenance tasks like building indexes and VACUUM. Speeds up index rebuilds if you re-create the HNSW index. |
+#### `shared_buffers`: 128 MB → 512 MB
+
+This is PostgreSQL's own in-memory data cache — a dedicated region of shared memory where it keeps frequently accessed table and index pages. This is the setting that matters most for our TLB problem.
+
+The pgvector HNSW index is ~100 MB, and the table data adds more on top. With the default 128 MB, there is barely enough room, so PostgreSQL constantly evicts pages and falls back to the OS page cache. At 512 MB, the entire index plus table data fits comfortably inside `shared_buffers`.
+
+**Why this matters for the ATP finding:** In Step 7, we will enable huge pages on `shared_buffers`. Huge pages only apply to this shared memory region — not to the OS page cache. By ensuring *all* the index data lives inside `shared_buffers`, we guarantee that every HNSW graph traversal hits huge-page-backed memory, which is exactly what eliminates the TLB misses ATP identified.
+
+#### `work_mem`: 4 MB → 128 MB
+
+Memory available per query for intermediate operations like sorting and building candidate lists. During an HNSW search, PostgreSQL builds and ranks a list of nearest-neighbor candidates. With only 4 MB, large candidate lists may spill to disk. At 128 MB, the search stays entirely in memory.
+
+#### `effective_cache_size`: 4 GB → 2 GB
+
+This does not allocate any memory — it is a hint to PostgreSQL's query planner about how much total cache (shared_buffers + OS file cache) is available. It helps the planner decide whether an index scan is likely to find its data in memory. We set it to a realistic estimate for the instance.
+
+#### `maintenance_work_mem`: 64 MB → 256 MB
+
+Memory for maintenance tasks like building indexes and VACUUM. Speeds up HNSW index rebuilds if you re-create the index later.
+
+### Apply and restart
 
 Restart PostgreSQL to apply changes:
 
@@ -274,10 +283,10 @@ sudo systemctl restart postgresql
 ### Re-benchmark
 
 ```bash
-python scripts/benchmark.py
+python3 scripts/benchmark.py
 ```
 
-You should see a moderate improvement in throughput. The bigger `shared_buffers` ensures the index data stays in PostgreSQL's own cache instead of relying on the OS page cache, which has more overhead to access. But the underlying TLB problem still exists — the memory is still divided into small 4 KB pages.
+You should see a moderate improvement in throughput. The bigger `shared_buffers` keeps the index data in PostgreSQL's own cache instead of relying on the OS page cache, which has more overhead to access. But the underlying TLB problem still exists — the memory is still divided into small 4 KB pages. That is what Step 7 addresses.
 
 ---
 
@@ -350,7 +359,7 @@ sudo sysctl -p
 ### Re-benchmark
 
 ```bash
-python scripts/benchmark.py
+python3 scripts/benchmark.py
 ```
 
 You should see a noticeable improvement in throughput. The TLB can now cover the shared memory region with far fewer entries, so the CPU spends less time on page table walks and more time on actual vector distance computation.
