@@ -140,15 +140,6 @@ def load_into_pgvector(embeddings, labels, class_names, db_name):
         print(f"\r  {end}/{n}", end="", flush=True)
     print()
 
-    # Build HNSW index
-    print("Building HNSW index (this may take a few minutes)...")
-    cur.execute(f"""
-        CREATE INDEX ON images
-        USING hnsw (embedding vector_l2_ops)
-        WITH (m = 16, ef_construction = 200)
-    """)
-    conn.commit()
-
     # Verify
     cur.execute("SELECT COUNT(*) FROM images")
     count = cur.fetchone()[0]

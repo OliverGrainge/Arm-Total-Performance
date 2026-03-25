@@ -8,7 +8,6 @@ performance before and after kernel optimisations.
 Usage:
     python scripts/benchmark.py                      # default: 10000 queries
     python scripts/benchmark.py --n-queries 5000     # fewer queries
-    python scripts/benchmark.py --ef-search 40       # lower ef_search
 """
 
 import argparse
@@ -19,17 +18,14 @@ import numpy as np
 import psycopg2
 
 
-def run_benchmark(db_name, query_embeddings, n_queries, k, ef_search):
+def run_benchmark(db_name, query_embeddings, n_queries, k):
     """Run batch kNN queries and report throughput."""
     queries = query_embeddings[:n_queries]
-    print(f"Benchmark: {len(queries)} queries, k={k}, ef_search={ef_search}")
+    print(f"Benchmark: {len(queries)} queries, k={k}")
     print(f"Database:  {db_name}\n")
 
     conn = psycopg2.connect(dbname=db_name)
     cur = conn.cursor()
-
-    # Set HNSW search parameter
-    cur.execute(f"SET hnsw.ef_search = {ef_search}")
 
     # Warm-up: run a few queries to warm the cache
     for i in range(min(10, len(queries))):
@@ -64,7 +60,6 @@ def run_benchmark(db_name, query_embeddings, n_queries, k, ef_search):
     print(f"  Throughput:     {qps:.1f} queries/sec")
     print(f"  Avg latency:    {avg_latency_ms:.2f} ms/query")
     print(f"  Queries:        {len(queries)}")
-    print(f"  ef_search:      {ef_search}")
     print(f"{'='*45}")
 
     cur.close()
@@ -77,7 +72,6 @@ def main():
     parser.add_argument("--data-dir", default=os.path.join(os.path.dirname(__file__), "..", "data"), help="Data directory")
     parser.add_argument("--n-queries", type=int, default=10000, help="Number of queries to run")
     parser.add_argument("--k", type=int, default=10, help="Number of nearest neighbors")
-    parser.add_argument("--ef-search", type=int, default=200, help="HNSW ef_search parameter")
     args = parser.parse_args()
 
     # Load query embeddings
@@ -93,7 +87,7 @@ def main():
           f"(dim={query_embeddings.shape[1]})\n")
 
     run_benchmark(
-        args.db_name, query_embeddings, args.n_queries, args.k, args.ef_search
+        args.db_name, query_embeddings, args.n_queries, args.k
     )
 
 

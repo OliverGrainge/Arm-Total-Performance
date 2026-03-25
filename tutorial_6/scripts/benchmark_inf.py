@@ -7,7 +7,6 @@ Prints the process PID on startup so you can target it directly.
 
 Usage:
     python scripts/benchmark_inf.py
-    python scripts/benchmark_inf.py --ef-search 40
 """
 
 import argparse
@@ -20,16 +19,15 @@ import numpy as np
 import psycopg2
 
 
-def run_infinite_benchmark(db_name, query_embeddings, k, ef_search):
+def run_infinite_benchmark(db_name, query_embeddings, k):
     """Run kNN queries in an infinite loop."""
     print(f"PID: {os.getpid()}")
-    print(f"Benchmark: infinite loop, k={k}, ef_search={ef_search}")
+    print(f"Benchmark: infinite loop, k={k}")
     print(f"Database:  {db_name}")
     print("Press Ctrl+C to stop.\n")
 
     conn = psycopg2.connect(dbname=db_name)
     cur = conn.cursor()
-    cur.execute(f"SET hnsw.ef_search = {ef_search}")
 
     n_queries = len(query_embeddings)
     iteration = 0
@@ -57,7 +55,6 @@ def main():
     parser.add_argument("--db-name", default="clip_search", help="PostgreSQL database name")
     parser.add_argument("--data-dir", default=os.path.join(os.path.dirname(__file__), "..", "data"), help="Data directory")
     parser.add_argument("--k", type=int, default=10, help="Number of nearest neighbors")
-    parser.add_argument("--ef-search", type=int, default=200, help="HNSW ef_search parameter")
     args = parser.parse_args()
 
     query_path = os.path.join(args.data_dir, "query_embeddings.npy")
@@ -70,7 +67,7 @@ def main():
     print(f"Loaded {query_embeddings.shape[0]} query embeddings "
           f"(dim={query_embeddings.shape[1]})\n")
 
-    run_infinite_benchmark(args.db_name, query_embeddings, args.k, args.ef_search)
+    run_infinite_benchmark(args.db_name, query_embeddings, args.k)
 
 
 if __name__ == "__main__":

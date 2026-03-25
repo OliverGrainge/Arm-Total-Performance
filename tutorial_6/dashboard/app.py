@@ -64,8 +64,6 @@ def search(query_text):
 
     conn = psycopg2.connect(dbname=DB_NAME)
     cur = conn.cursor()
-    cur.execute("SET hnsw.ef_search = 100")
-
     t0 = time.perf_counter()
     cur.execute(
         "SELECT id, label, embedding <-> %s::vector AS distance "
