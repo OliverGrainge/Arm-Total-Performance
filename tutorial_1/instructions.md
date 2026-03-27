@@ -1,12 +1,12 @@
-# Tutorial 1: Top-Down Performance Analysis with Arm-Total-Performance
+# Tutorial 1: Top-Down Performance Analysis with Arm-Performix
 
-Performance problems are rarely obvious from source code alone. A loop can look perfectly reasonable yet run far slower than expected, and without measurement it is easy to optimise the wrong thing. This tutorial shows you how to use **Arm Total Performance (ATP)** on **AWS Graviton** to identify bottlenecks systematically and verify that each fix actually works.
+Performance problems are rarely obvious from source code alone. A loop can look perfectly reasonable yet run far slower than expected, and without measurement it is easy to optimise the wrong thing. This tutorial shows you how to use **Arm Performix** on **AWS Graviton** to identify bottlenecks systematically and verify that each fix actually works.
 
-The example workload is dense matrix multiplication (`C = A x B`) in single-precision floating point. It is deliberately simple: the code is short and the algorithm is well known, which makes it easy to focus on what ATP is telling you at each step. The goal is not just to optimise this workload, but to learn a diagnostic method you can apply to any code.
+The example workload is dense matrix multiplication (`C = A x B`) in single-precision floating point. It is deliberately simple: the code is short and the algorithm is well known, which makes it easy to focus on what Performix is telling you at each step. The goal is not just to optimise this workload, but to learn a diagnostic method you can apply to any code.
 
-You will work through three iterations of ATP's core optimisation loop: **profile, diagnose, fix, re-profile**. At each step, ATP identifies the dominant bottleneck, you apply a targeted fix, and ATP confirms whether the profile shifted as expected. By the end of this tutorial, you will know how to:
+You will work through three iterations of Performix's core optimisation loop: **profile, diagnose, fix, re-profile**. At each step, Performix identifies the dominant bottleneck, you apply a targeted fix, and Performix confirms whether the profile shifted as expected. By the end of this tutorial, you will know how to:
 
-1. Read the ATP Topdown Summary view to identify the dominant bottleneck category.
+1. Read the Performix Topdown Summary view to identify the dominant bottleneck category.
 2. Use cache effectiveness metrics in the Functions tab to determine which cache level is responsible.
 3. Interpret the Speculative Operation Mix in the Retiring breakdown to assess SIMD utilisation.
 
@@ -15,7 +15,7 @@ You will work through three iterations of ATP's core optimisation loop: **profil
 - An AWS Graviton 2/3 instance
 - C++ compiler (g++ 9+ or clang++ 14+)
 - CMake 3.16+
-- ATP installed and configured
+- Performix installed and configured
 
 ## Workload Definition: MatMul Operator
 
@@ -31,13 +31,13 @@ The default problem size in this repo is `M=256, K=1024, N=8192`, and total floa
 
 ## Background: What the Top-Down View Shows You
 
-Before opening ATP, it helps to understand what the numbers mean. You can skip this section and refer back to it as needed.
+Before opening Performix, it helps to understand what the numbers mean. You can skip this section and refer back to it as needed.
 
 ### The four buckets
 
-The Topdown method starts from a simple idea: in every CPU cycle, the core has a limited opportunity to make progress. ATP models that opportunity as a set of *slots*. You can think of a slot as one place where a micro-op could have been issued.
+The Topdown method starts from a simple idea: in every CPU cycle, the core has a limited opportunity to make progress. Performix models that opportunity as a set of *slots*. You can think of a slot as one place where a micro-op could have been issued.
 
-ATP then accounts for every slot and asks what happened to it. Did it turn into useful work, sit idle because the frontend could not supply work, get held up in the backend, or get spent on speculative work that was later discarded? These outcomes are grouped into four mutually exclusive buckets.
+Performix then accounts for every slot and asks what happened to it. Did it turn into useful work, sit idle because the frontend could not supply work, get held up in the backend, or get spent on speculative work that was later discarded? These outcomes are grouped into four mutually exclusive buckets.
 
 **Retiring** represents slots used for instructions that complete and contribute to the final result. When Retiring is high, a larger share of the CPU's issue capacity is being converted into useful work.
 
@@ -61,17 +61,17 @@ Topdown
 
 For example, if **Backend Bound** is the largest bucket, the next question is whether those slots are being lost to the memory system or to pressure on the execution units. If the problem is memory-related, the next level helps you see whether the delays are mainly coming from L1, L2, LLC, or DRAM. Each step makes the diagnosis more specific and helps you choose a sensible optimisation direction.
 
-### ATP's recipes and when to use them
+### Performix's recipes and when to use them
 
-The Topdown view is one way of looking at a program in ATP, not the only one. ATP provides several recipes that answer different performance questions, and they are often most useful when used together.
+The Topdown view is one way of looking at a program in Performix, not the only one. Performix provides several recipes that answer different performance questions, and they are often most useful when used together.
 
 **CPU Cycle Hotspots** shows *where* the program is spending CPU time, so it is useful for identifying the functions worth investigating. **Topdown** shows *why* those functions are slow by breaking slots into the categories described above. **Memory Access** gives a more detailed view of memory behaviour and is useful when Topdown suggests a memory-related bottleneck. **Instruction Mix** shows what kinds of instructions are being executed and is useful for checking whether code is scalar or vectorised.
 
 In this tutorial, **Topdown** is the main recipe because it provides the primary diagnostic signal for each optimisation step. The other recipes appear as supporting views when they help confirm or explain what Topdown is showing.
 
-> **Note on measurement bias:** ATP's sampling reports Retiring slightly low and Frontend/Bad Speculation slightly high. Use values for **relative comparison between runs**, not as absolute ground truth.
+> **Note on measurement bias:** Performix's sampling reports Retiring slightly low and Frontend/Bad Speculation slightly high. Use values for **relative comparison between runs**, not as absolute ground truth.
 
-With that background in place, the next step is to build and run the example on your Graviton instance. We will start with the baseline implementation, profile it in ATP, and then use the results to guide each optimisation pass.
+With that background in place, the next step is to build and run the example on your Graviton instance. We will start with the baseline implementation, profile it in Performix, and then use the results to guide each optimisation pass.
 
 ---
 
@@ -123,22 +123,22 @@ void matmul_naive(const float* A, const float* B, float* C, int M, int K, int N)
 
 The key access pattern is the innermost load `B[k*N + j]`: as `k` increments, the address jumps by `N` floats each time.
 
-We suspect this is slow, but *why*? This is where ATP comes in.
+We suspect this is slow, but *why*? This is where Performix comes in.
 
 ### Step 1: Run the Topdown recipe
 
-Open ATP and select **Recipes -> Topdown**. Choose the `matmul_naive` executable as the target:
+Open Performix and select **Recipes -> Topdown**. Choose the `matmul_naive` executable as the target:
 
 <p align="center">
-<img src="assets/run_recipe.png" width="850" alt="Selecting the Topdown recipe in ATP"/>
+<img src="assets/run_recipe.png" width="850" alt="Selecting the Topdown recipe in Performix"/>
 </p>
 
-ATP will collect hardware performance counter data for approximately 30 seconds. When it finishes, it opens the **Summary** view automatically.
+Performix will collect hardware performance counter data for approximately 30 seconds. When it finishes, it opens the **Summary** view automatically.
 
 ### Step 2: Read the Summary view
 
 <p align="center">
-<img src="assets/naive_topdown.png" width="850" alt="ATP Topdown summary for naive matmul"/>
+<img src="assets/naive_topdown.png" width="850" alt="Performix Topdown summary for naive matmul"/>
 </p>
 
 Look at the four top-level bars. **Backend Bound** dominates at roughly 80%. This tells you that the frontend is supplying micro-ops adequately, but the backend cannot execute them fast enough because it is stalled. Retiring is low at around 10%, meaning most of the CPU's capacity is wasted waiting rather than doing useful work.
@@ -159,7 +159,7 @@ At **L1D**, the signal is strongest: about **166.7 misses per 1000 instructions 
 
 At **L2**, the pressure is much lower but still visible: roughly **14.5 MPKI** and an **L2 miss ratio of about 2.9%**. Most L1D misses are recovered in L2, but not all.
 
-At the **last-level cache**, ATP shows about **1.9 LLC read misses per 1000 instructions** and an **LL cache read miss ratio of about 11.7%**. Most requests that reach LLC hit there, and only the remainder spill to DRAM.
+At the **last-level cache**, Performix shows about **1.9 LLC read misses per 1000 instructions** and an **LL cache read miss ratio of about 11.7%**. Most requests that reach LLC hit there, and only the remainder spill to DRAM.
 
 The key point is simple: the naive kernel wastes a huge amount of time missing in **L1D**, and enough of those misses continue down the hierarchy to keep the backend stalled waiting on data.
 
@@ -222,7 +222,7 @@ The animation below shows how tiling changes the access pattern. The dashed box 
 Run the Topdown recipe again, this time on `matmul_tiled`. Always re-profile after a change and never assume your optimisation had the intended effect.
 
 <p align="center">
-<img src="assets/tiled_topdown.png" width="850" alt="ATP Topdown summary for tiled matmul"/>
+<img src="assets/tiled_topdown.png" width="850" alt="Performix Topdown summary for tiled matmul"/>
 </p>
 
 Comparing the Summary view with the naive run, the improvement is dramatic. **Retiring** jumped from ~10% to 66.5%, meaning the pipeline is now doing useful work most of the time. **Backend Bound** dropped from ~80% to 19%, showing that memory stalls have been largely eliminated.
@@ -243,7 +243,7 @@ The optimisation has done its job: the tiled kernel has turned a poor-locality, 
 
 ### New diagnosis: inspect the Retiring breakdown
 
-With the memory bottleneck removed, look at the **Retiring** breakdown. In ATP, the **Speculative Operation Mix** panel shows what kinds of instructions are contributing to Retiring:
+With the memory bottleneck removed, look at the **Retiring** breakdown. In Performix, the **Speculative Operation Mix** panel shows what kinds of instructions are contributing to Retiring:
 
 <p align="center">
 <img src="assets/tiled_retiring.png" width="200" alt="Operation mix for tiled matmul"/>
@@ -328,7 +328,7 @@ The result confirms the optimisation worked. Scalar floating-point dropped from 
 
 ## The Full Picture
 
-Run all three back-to-back and compare your ATP profiles:
+Run all three back-to-back and compare your Performix profiles:
 
 ```bash
 ./matmul_naive
@@ -336,11 +336,11 @@ Run all three back-to-back and compare your ATP profiles:
 ./matmul_neon
 ```
 
-Across the three optimisation steps, the ATP Topdown view tells a consistent story of progress. For the naive kernel, Backend Bound dominates, the cache metrics show poor locality, and SIMD utilisation is 0%. After tiling, Retiring becomes dominant and L1D miss activity drops sharply, but SIMD remains at 0%. After adding NEON register blocking, SIMD utilisation rises substantially and Backend Bound stays low.
+Across the three optimisation steps, the Performix Topdown view tells a consistent story of progress. For the naive kernel, Backend Bound dominates, the cache metrics show poor locality, and SIMD utilisation is 0%. After tiling, Retiring becomes dominant and L1D miss activity drops sharply, but SIMD remains at 0%. After adding NEON register blocking, SIMD utilisation rises substantially and Backend Bound stays low.
 
-The diagnostic workflow follows the same pattern at each step. For the naive kernel, ATP pointed to Backend Bound, which narrowed to Memory Bound and then severe L1D misses caused by strided B access. The fix was 2D tiling to keep tiles in cache. For the tiled kernel, ATP showed Retiring was dominant but SIMD was 0%, pointing to scalar arithmetic as the bottleneck. The fix was a NEON 4x4 micro-kernel. After the NEON version, SIMD utilisation is at 31.6% and Backend Bound is minimal, indicating the workload is now compute-efficient.
+The diagnostic workflow follows the same pattern at each step. For the naive kernel, Performix pointed to Backend Bound, which narrowed to Memory Bound and then severe L1D misses caused by strided B access. The fix was 2D tiling to keep tiles in cache. For the tiled kernel, Performix showed Retiring was dominant but SIMD was 0%, pointing to scalar arithmetic as the bottleneck. The fix was a NEON 4x4 micro-kernel. After the NEON version, SIMD utilisation is at 31.6% and Backend Bound is minimal, indicating the workload is now compute-efficient.
 
-The key is that **ATP told us what to fix at each step**. The Topdown Summary pointed to the bottleneck category, and narrowing the diagnosis with cache effectiveness or the operation mix told us exactly what to change.
+The key is that **Performix told us what to fix at each step**. The Topdown Summary pointed to the bottleneck category, and narrowing the diagnosis with cache effectiveness or the operation mix told us exactly what to change.
 
 ---
 
@@ -352,6 +352,6 @@ The key is that **ATP told us what to fix at each step**. The Topdown Summary po
 
 **High Retiring with 0% SIMD** means the pipeline is busy but processing only one element at a time. Vectorising with NEON intrinsics can deliver up to 4x throughput improvement for 32-bit float arithmetic.
 
-**Always re-profile after each change.** ATP makes it easy to compare runs and confirm your optimisation addressed the right bottleneck. Never assume a change improved performance without measuring.
+**Always re-profile after each change.** Performix makes it easy to compare runs and confirm your optimisation addressed the right bottleneck. Never assume a change improved performance without measuring.
 
 **Use the right recipe for the question.** Topdown is for diagnosing bottleneck categories. CPU Cycle Hotspots is for finding which functions are hot. Memory Access provides detailed cache analysis. Instruction Mix verifies that vectorisation was applied correctly.

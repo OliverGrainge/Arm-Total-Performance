@@ -4,7 +4,7 @@ project(tutorial_3_gpt2 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Match the other tutorials: optimise and keep debug info for ATP.
+# Match the other tutorials: optimise and keep debug info for Performix.
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -g")
 
 add_executable(gpt2 src/gpt2.cpp)

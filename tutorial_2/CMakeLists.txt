@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # -O2: optimise both binaries identically.
-# -g:  retain debug info so ATP source view can resolve line numbers.
+# -g:  retain debug info so Performix source view can resolve line numbers.
 # The only variable between the two binaries is data layout, not compiler flags.
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -g")
 

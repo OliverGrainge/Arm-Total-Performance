@@ -1,6 +1,6 @@
-# Tutorial 3: Using ATP Instruction Mix to Optimise a C++ Workload
+# Tutorial 3: Using Performix Instruction Mix to Optimise a C++ Workload
 
-This tutorial shows you how to use **Arm Total Performance (ATP)** to optimise a real C++ LLM chatbot program. You will apply two ATP recipes - **CPU Cycle Hotspots** and **Instruction Mix** - in sequence. CPU Cycle Hotspots tells you which function is worth investigating. Instruction Mix tells you how that function is spending its time at the instruction level. Together they give you a concrete, evidence-based optimisation direction rather than a guess.
+This tutorial shows you how to use **Arm Performix** to optimise a real C++ LLM chatbot program. You will apply two Performix recipes - **CPU Cycle Hotspots** and **Instruction Mix** - in sequence. CPU Cycle Hotspots tells you which function is worth investigating. Instruction Mix tells you how that function is spending its time at the instruction level. Together they give you a concrete, evidence-based optimisation direction rather than a guess.
 
 The workload is `gpt2`, a text-generation program that runs a medium-sized language model on the CPU. It is a realistic inference workload: compute-intensive, numerically dominated, and representative of the kind of code that benefits most from Arm's vector extensions. The tutorial follows the full loop a developer would use in practice: profile the workload, diagnose the bottleneck, apply a targeted fix, and re-profile to confirm the change worked. By the end of this tutorial, you will know how to:
 
@@ -15,13 +15,13 @@ The workload is `gpt2`, a text-generation program that runs a medium-sized langu
 - GCC 11+ or Clang 14+
 - CMake 3.16+
 - Python 3.8+ with `pip`
-- ATP installed and configured
+- Performix installed and configured
 
 ## Background: Scalar versus Vector Arithmetic on Graviton3
 
 Instruction mix matters because performance depends not just on how many instructions a program executes, but on what kind of instructions they are. On a floating-point workload, a loop that mainly uses scalar instructions will do less work per instruction than one using the CPU's vector units. That makes instruction mix a useful signal to investigate: it shows whether the hot code is actually using the hardware efficiently, or leaving throughput on the table.
 
-ATP's **Instruction Mix** recipe counts every retired instruction and groups it by type: scalar integer, scalar FP, NEON, SVE, load/store, branch, and so on. For this tutorial, the most important categories are:
+Performix's **Instruction Mix** recipe counts every retired instruction and groups it by type: scalar integer, scalar FP, NEON, SVE, load/store, branch, and so on. For this tutorial, the most important categories are:
 
 - **Scalar FP**: floating-point instructions operating on one value at a time. A simple non-vectorised C loop will often compile to this.
 - **NEON**: Arm's 128-bit SIMD extension. For single-precision data, one instruction can operate on 4 floats at once.
@@ -30,7 +30,7 @@ ATP's **Instruction Mix** recipe counts every retired instruction and groups it 
 For a compute-heavy kernel, the balance between Scalar FP and SVE is a strong diagnostic signal. If the hot numerical loop is mostly scalar on a Graviton3 system, the processor's wider vector hardware is not being used well.
 
 
-> **Note on measurement bias:** Because `matmul` accounts for ~84% of cycles in this workload, its instruction behaviour dominates the whole-program Instruction Mix ATP reports. The whole-program view is, in practice, a close proxy for what `matmul` is doing.
+> **Note on measurement bias:** Because `matmul` accounts for ~84% of cycles in this workload, its instruction behaviour dominates the whole-program Instruction Mix Performix reports. The whole-program view is, in practice, a close proxy for what `matmul` is doing.
 
 ---
 
@@ -77,7 +77,7 @@ cd build
 ./gpt2 --model gpt2-medium "Once upon a time" -n 50
 ```
 
-When the program finishes generating, it prints a final line like this showing the generation throughput in tokens per second. Write it down; this is your baseline measurement. Next, you will use ATP to identify where the program spends its time so you can start improving its performance.
+When the program finishes generating, it prints a final line like this showing the generation throughput in tokens per second. Write it down; this is your baseline measurement. Next, you will use Performix to identify where the program spends its time so you can start improving its performance.
 
 ```text
 [50 tokens, 3.4 tok/s]
@@ -95,7 +95,7 @@ The first question to ask about any workload is: where does the program actually
 
 ### Step 1: Run the recipe
 
-Open ATP and select **Recipes -> CPU Cycle Hotspots**. Set the workload to launch `gpt2` with arguments `--model gpt2-medium "Once upon a time" -n 100`, then click **Run Recipe**.
+Open Performix and select **Recipes -> CPU Cycle Hotspots**. Set the workload to launch `gpt2` with arguments `--model gpt2-medium "Once upon a time" -n 100`, then click **Run Recipe**.
 
 ### Step 2: Read the flame graph
 
@@ -109,7 +109,7 @@ The flame graph shows that most of the program's time is spent in `forward`, and
 
 ### Step 3: Read the Functions table
 
-In the CPU Hotspots run, switch to the **Functions** tab. Here, ATP lists every sampled function alongside its percentage of total cycles that it occupies:
+In the CPU Hotspots run, switch to the **Functions** tab. Here, Performix lists every sampled function alongside its percentage of total cycles that it occupies:
 
 <p align="center">
 <img src="assets/gpt2_functions_table.png" width="850" alt="Functions table for gpt2 showing matmul at roughly 84% of cycles with all other functions combined as a small fraction"/>
@@ -123,15 +123,15 @@ The profile is clear: `matmul` accounts for about 84% of runtime. That means imp
 
 ## Profile the Baseline: Instruction Mix
 
-ATP's Instruction Mix recipe answers this question directly. It counts every instruction that retires and classifies it by type. For this workload, the most important categories are Scalar FP and SVE. If the hot `matmul` loop emits scalar instructions, the CPU processes one float per instruction. If it emits SVE instructions, it can process 8 floats per instruction. The ratio between these categories is therefore a useful signal for whether the implementation is making good use of the processor's arithmetic hardware.
+Performix's Instruction Mix recipe answers this question directly. It counts every instruction that retires and classifies it by type. For this workload, the most important categories are Scalar FP and SVE. If the hot `matmul` loop emits scalar instructions, the CPU processes one float per instruction. If it emits SVE instructions, it can process 8 floats per instruction. The ratio between these categories is therefore a useful signal for whether the implementation is making good use of the processor's arithmetic hardware.
 
 ### Step 1: Run the recipe
 
-In ATP, select **Recipes -> Instruction Mix**. Use the same workload and arguments - `gpt2 --model gpt2-medium "Once upon a time" -n 100` - then click **Run Recipe**.
+In Performix, select **Recipes -> Instruction Mix**. Use the same workload and arguments - `gpt2 --model gpt2-medium "Once upon a time" -n 100` - then click **Run Recipe**.
 
 ### Step 2: Read the breakdown
 
-ATP presents a workload-wide breakdown of retired instruction types. Because `matmul` accounts for about 84% of cycles, this chart is effectively showing you how `matmul` executes:
+Performix presents a workload-wide breakdown of retired instruction types. Because `matmul` accounts for about 84% of cycles, this chart is effectively showing you how `matmul` executes:
 
 <p align="center">
 <img src="assets/gpt2_instruction_mix.png" width="850" alt="Instruction Mix for gpt2: Scalar FP accounts for 16.7% of retired instructions and the SVE row reads 0%"/>
@@ -170,7 +170,7 @@ The inner loop performs one scalar multiply-accumulate per iteration, surrounded
 
 ## Fix and Re-Profile: KleidiAI SVE Microkernel
 
-ATP has identified the problem: the dominant function is a scalar loop running on a processor with idle SVE vector units. The fix is to replace it with a vectorised implementation from [KleidiAI](https://github.com/ARM-software/kleidiai), Arm's open-source library of hand-tuned AI microkernels.
+Performix has identified the problem: the dominant function is a scalar loop running on a processor with idle SVE vector units. The fix is to replace it with a vectorised implementation from [KleidiAI](https://github.com/ARM-software/kleidiai), Arm's open-source library of hand-tuned AI microkernels.
 
 The change has two parts. First, weight matrices are repacked once at startup into a tiled memory layout the microkernel can load efficiently - this cost is not included in the reported tok/s. Second, the scalar loop body is replaced by calls to `ukernel.run_matmul`. The bias addition (`b ? b[i] : 0.f`) is folded into the surrounding code so the microkernel handles only the matrix multiply; the final result is identical.
 
@@ -223,7 +223,7 @@ cd build
 
 Run the Instruction Mix recipe again, this time with `gpt2_kai_sve` as the workload. Always re-profile after a change and never assume your optimisation had the intended effect.
 
-In ATP, select **Recipes -> Instruction Mix**, set the workload to `gpt2_kai_sve --model gpt2-medium "Once upon a time" -n 100`, and click **Run Recipe**.
+In Performix, select **Recipes -> Instruction Mix**, set the workload to `gpt2_kai_sve --model gpt2-medium "Once upon a time" -n 100`, and click **Run Recipe**.
 
 ### Step 2: Read the new Instruction Mix breakdown
 
@@ -276,7 +276,7 @@ Compare the tok/s figures from both runs:
   </tbody>
 </table>
 
-The throughput increase is the real-world consequence of the instruction-level change ATP measured. No algorithm changed, no data was restructured, no compiler flags were added. The improvement comes entirely from replacing scalar FP instructions with SVE instructions in the one function that dominates the runtime.
+The throughput increase is the real-world consequence of the instruction-level change Performix measured. No algorithm changed, no data was restructured, no compiler flags were added. The improvement comes entirely from replacing scalar FP instructions with SVE instructions in the one function that dominates the runtime.
 
 <p align="center">
 <img src="assets/gpt_kai_sve_textgen.gif" width="850" alt="Terminal recording of gpt2_kai_sve generating text at higher throughput after the SVE optimisation"/>

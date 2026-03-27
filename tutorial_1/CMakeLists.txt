@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # -O2 so all examples build with the same optimization level.
-# -g for debug symbols so ATP can map samples back to source lines.
+# -g for debug symbols so Performix can map samples back to source lines.
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -g")
 
 add_executable(matmul_naive  src/matmul_naive.cpp)

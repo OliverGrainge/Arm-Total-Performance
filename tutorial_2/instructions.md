@@ -1,7 +1,7 @@
-# Tutorial 2: Optimising a Memory-Bound Workload with Arm-Total-Performance
+# Tutorial 2: Optimising a Memory-Bound Workload with Arm-Performix
 Memory bottlenecks are common on modern CPUs and often hard to spot without the right tools. A loop with simple arithmetic, no branching, and no data dependencies can still run far below its theoretical peak, and the cause is frequently a data layout problem rather than anything in the algorithm itself.
 
-In this tutorial, you will use **Arm Total Performance (ATP)** to investigate exactly this kind of problem on **AWS Graviton**. Starting from a particle physics position-update loop with a subtle data layout inefficiency, you will use ATP's **Memory Access** recipe to measure cache behaviour, **CPU Cycle Hotspots** to map the cost to specific source lines, and both together to confirm the fix once applied. By the end of this tutorial, you will know how to:
+In this tutorial, you will use **Arm Performix** to investigate exactly this kind of problem on **AWS Graviton**. Starting from a particle physics position-update loop with a subtle data layout inefficiency, you will use Performix's **Memory Access** recipe to measure cache behaviour, **CPU Cycle Hotspots** to map the cost to specific source lines, and both together to confirm the fix once applied. By the end of this tutorial, you will know how to:
 
 1. Use the Memory Access recipe to measure cache hit rates and average load latency.
 2. Use CPU Cycle Hotspots to map memory pressure to specific source lines.
@@ -13,7 +13,7 @@ In this tutorial, you will use **Arm Total Performance (ATP)** to investigate ex
 - An AWS Graviton 2/3 instance
 - GCC 9+ or Clang 14+
 - CMake 3.16+
-- ATP installed and configured
+- Performix installed and configured
 - Python 3 with `numpy`, `matplotlib`, and `Pillow` (for visualisation only -- `pip install numpy matplotlib Pillow`)
 
 ## Terms used in this tutorial
@@ -21,7 +21,7 @@ In this tutorial, you will use **Arm Total Performance (ATP)** to investigate ex
 - **CPU**: central processing unit.
 - **Cache line**: the minimum unit of data transferred between memory levels (64 bytes on Arm).
 - **SPE**: Arm Statistical Profiling Extension, the hardware sampling mechanism used by the Memory Access recipe.
-- **Periodic Samples**: ATP's sampled execution counts shown in CPU Cycle Hotspots tables.
+- **Periodic Samples**: Performix's sampled execution counts shown in CPU Cycle Hotspots tables.
 - **L1C**: Level 1 data cache - the fastest and smallest cache, closest to the CPU core.
 - **L2C**: Level 2 cache - larger and slower than L1C.
 
@@ -79,7 +79,7 @@ python3 scripts/visualize.py          # reads build/galaxy_aos.bin by default
 # outputs: assets/galaxy_aos.gif  (full animation)
 ```
 
-> **Note:** Omit `--visualize` when profiling with ATP. The flag adds file I/O that is not part of the workload being measured.
+> **Note:** Omit `--visualize` when profiling with Performix. The flag adds file I/O that is not part of the workload being measured.
 
 <figure align="center">
 <img src="./assets/galaxy_aos.gif" width="500" alt="Animated GIF showing differential rotation of the spiral galaxy"/>
@@ -90,11 +90,11 @@ python3 scripts/visualize.py          # reads build/galaxy_aos.bin by default
 
 ## Profile the baseline with Memory Access
 
-With the workload running correctly, the first question is: **where is the time going?** Since this is a simple arithmetic loop over a large array, memory behaviour is the most likely factor. ATP's Memory Access recipe uses the Arm SPE hardware to sample loads and attribute them to cache tiers.
+With the workload running correctly, the first question is: **where is the time going?** Since this is a simple arithmetic loop over a large array, memory behaviour is the most likely factor. Performix's Memory Access recipe uses the Arm SPE hardware to sample loads and attribute them to cache tiers.
 
 ### Run the recipe
 
-In ATP:
+In Performix:
 
 1. Open **Recipes**.
 2. Select **Memory Access**.
@@ -143,7 +143,7 @@ The Memory Access profile told us there is a memory problem, but not *which line
 
 ### Run the recipe
 
-In ATP:
+In Performix:
 
 1. Open **Recipes**.
 2. Select **CPU Cycle Hotspots**.
@@ -155,9 +155,9 @@ In ATP:
 
 In the **Functions** table, locate `main`, then double-click it (or right-click -> **View Source Code**). If prompted, click **Specify Root Directory** and point to your local source tree.
 
-Although ATP attributes the samples to `main`, the hot code is the inlined `update_positions` routine. This routine is the particle-update loop shown below: it advances `x`, `y`, and `z` using `vx`, `vy`, and `vz`.
+Although Performix attributes the samples to `main`, the hot code is the inlined `update_positions` routine. This routine is the particle-update loop shown below: it advances `x`, `y`, and `z` using `vx`, `vy`, and `vz`.
 
-Navigate to the `update_positions` function body (lines 19-22). ATP shows periodic sample counts on each line:
+Navigate to the `update_positions` function body (lines 19-22). Performix shows periodic sample counts on each line:
 
 ```
 Line 19:    208  for (int i = 0; i < n; ++i) {
@@ -199,7 +199,7 @@ ParticleAoS: [x y z vx vy vz | mass charge temp | pressure energy density | spin
 
 Each cache line fetch loads 64 bytes, but the update loop only uses the first 24 bytes (the six position and velocity floats). The remaining 40 bytes -- `mass`, `charge`, `temperature`, `pressure`, `energy`, `density`, `spin_*`, and padding -- are loaded, occupy cache space, and are evicted without ever being read. This is **37.5% cache line utilisation** (24 / 64).
 
-The consequences explain exactly what ATP reported:
+The consequences explain exactly what Performix reported:
 
 - **Low L1C hit rate (68%)**: with 40 wasted bytes per cache line, the effective working set is 64 MB (1,048,576 x 64 bytes). On Graviton2 this exceeds the 32 MB LLC, so every iteration must pull most data from DRAM. Even on Graviton3 with its larger 64 MB LLC, the working set fills the cache entirely, leaving no room for other data and causing continuous eviction pressure. L1C is also continuously filled with data the loop will never use, evicting useful lines before they can be reused.
 - **High L1C avg latency (29 cycles)**: the hardware prefetcher is streaming 64 bytes per particle when the loop only needs 24 -- 2.67x the necessary memory traffic. This extra pressure means prefetches frequently do not complete before the data is demanded, causing stalls that inflate the average L1C latency well above the true L1C hit cost of under 10 cycles.
@@ -332,7 +332,7 @@ Notice the second confirmation: **the distribution across lines is now even** (7
 
 </div>
 
-The improvement came entirely from restructuring data, not from changing the algorithm, adding compiler hints, or rewriting the loop. ATP's two recipes provided the evidence at each step: Memory Access revealed the cache problem, CPU Cycle Hotspots pinpointed the source lines and confirmed the skew pattern that pointed to per-struct cache line fetches, and both recipes verified the fix after the change.
+The improvement came entirely from restructuring data, not from changing the algorithm, adding compiler hints, or rewriting the loop. Performix's two recipes provided the evidence at each step: Memory Access revealed the cache problem, CPU Cycle Hotspots pinpointed the source lines and confirmed the skew pattern that pointed to per-struct cache line fetches, and both recipes verified the fix after the change.
 
 > **Note on Graviton hardware variants.** The screenshots were taken on a development machine with a large L3 cache. On Graviton2 (32 MB LLC), the 64 MB AoS working set far exceeds L3, so the AoS profile will show significant LLC and DRAM traffic, and the improvement from SoA will be even more pronounced. On Graviton3 (64 MB LLC), the AoS working set nominally fits but leaves no headroom, so eviction pressure and bandwidth waste still cause poor cache behaviour.
 
@@ -341,8 +341,8 @@ The improvement came entirely from restructuring data, not from changing the alg
 
 ## Troubleshooting notes
 
-- Keep `-g` enabled so ATP can resolve source locations to line numbers.
+- Keep `-g` enabled so Performix can resolve source locations to line numbers.
 - Keep the profiled problem size at `N = 1 << 20` and `iters = 200` for stable SPE sampling; the longer `1,000`-iteration run is only used when `--visualize` is enabled.
 - Compare like-for-like runs: same Graviton instance, same CPU frequency policy, no other heavy workloads running concurrently.
-- If `update_positions` does not appear as a separate function in ATP (shows only `main`), this is expected because the compiler inlines static functions. Click `main` and navigate to the `update_positions` body in the source view.
-- If ATP does not resolve source lines at all (shows `??`), ensure you point the source root to the `tutorial_2/src` directory and verify debug symbols are present (`file aos_baseline` should show `with debug_info`).
+- If `update_positions` does not appear as a separate function in Performix (shows only `main`), this is expected because the compiler inlines static functions. Click `main` and navigate to the `update_positions` body in the source view.
+- If Performix does not resolve source lines at all (shows `??`), ensure you point the source root to the `tutorial_2/src` directory and verify debug symbols are present (`file aos_baseline` should show `with debug_info`).
