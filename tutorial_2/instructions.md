@@ -10,7 +10,7 @@ In this tutorial, you will use **Arm Performix** to investigate exactly this kin
 
 ## Before you begin
 
-- An AWS Graviton 2/3 instance
+- An AWS Graviton instance (`c7g.metal` recommended)
 - GCC 9+ or Clang 14+
 - CMake 3.16+
 - Performix installed and configured

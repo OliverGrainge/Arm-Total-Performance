@@ -28,7 +28,7 @@ Steps 2 and 3 are where performance matters. With a million keys and 1 GB of dat
 
 ## Before you begin
 
-- An **AWS Graviton 2/3** instance (e.g. `m7g.xlarge` with 4+ GB RAM)
+- An **AWS Graviton** instance (`c7g.metal` recommended, 4+ GB RAM)
 - **Performix** installed and configured
 
 ## Terms used in this tutorial

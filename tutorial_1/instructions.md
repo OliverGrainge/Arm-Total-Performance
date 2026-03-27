@@ -12,7 +12,7 @@ You will work through three iterations of Performix's core optimisation loop: **
 
 ## Before you begin
 
-- An AWS Graviton 2/3 instance
+- An AWS Graviton instance (`c7g.metal` recommended)
 - C++ compiler (g++ 9+ or clang++ 14+)
 - CMake 3.16+
 - Performix installed and configured

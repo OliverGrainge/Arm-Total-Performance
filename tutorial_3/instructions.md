@@ -11,7 +11,7 @@ The workload is `gpt2`, a text-generation program that runs a medium-sized langu
 
 ## Before you begin
 
-- An AWS Graviton3 instance (SVE is required for the optimised binary)
+- An AWS Graviton3 instance (`c7g.metal` recommended; SVE is required for the optimised binary)
 - GCC 11+ or Clang 14+
 - CMake 3.16+
 - Python 3.8+ with `pip`
