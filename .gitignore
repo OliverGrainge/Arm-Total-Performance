@@ -48,3 +48,6 @@ Thumbs.db
 *.docx
 *.npy
 class_names.txt
+*tar.gz
+user_guide.txt
+redis-7.2.7/
