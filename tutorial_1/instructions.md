@@ -1,14 +1,14 @@
 # Tutorial 1: Top-Down Performance Analysis with Arm-Performix
 
-Performance problems are rarely obvious from source code alone. A loop can look perfectly reasonable yet run far slower than expected, and without measurement it is easy to optimise the wrong thing. This tutorial shows you how to use **Arm Performix** on **AWS Graviton** to identify bottlenecks systematically and verify that each fix actually works.
+Software performance issues are rarely obvious from source code alone. A loop can look perfectly reasonable yet run far slower than expected, and without hardware-level measurement it's easy to optimise the wrong thing.
 
-The example workload is dense matrix multiplication (`C = A x B`) in single-precision floating point. It is deliberately simple: the code is short and the algorithm is well known, which makes it easy to focus on what Performix is telling you at each step. The goal is not just to optimise this workload, but to learn a diagnostic method you can apply to any code.
+This tutorial shows you how to use **Arm Performix**, an advanced performance engineering tool, to identify bottlenecks and verify that each fix actually works. The example workload is a dense matrix multiplication (`C = A × B`), but the goal isn't just to speed it up — it's to learn a **profile → diagnose → fix → re-profile** workflow you can apply to any program.
 
-You will work through three iterations of Performix's core optimisation loop: **profile, diagnose, fix, re-profile**. At each step, Performix identifies the dominant bottleneck, you apply a targeted fix, and Performix confirms whether the profile shifted as expected. By the end of this tutorial, you will know how to:
+You'll work through three iterations of that loop. At each step, Performix helps you find the dominant bottleneck, apply a targeted fix, and confirm the improvement. By the end you'll know how to:
 
-1. Read the Performix Topdown Summary view to identify the dominant bottleneck category.
-2. Use cache effectiveness metrics in the Functions tab to determine which cache level is responsible.
-3. Interpret the Speculative Operation Mix in the Retiring breakdown to assess SIMD utilisation.
+1. Use the Microarchitectural Analysis to identify the dominant program bottleneck.
+2. Use cache-effectiveness measurements to pinpoint exact memory issues.
+3. Interpret Operation Mix's to assess vector unit utilization.
 
 ## Before you begin
 
@@ -19,23 +19,36 @@ You will work through three iterations of Performix's core optimisation loop: **
 
 ## Workload Definition: MatMul Operator
 
-All three binaries in this tutorial implement the same row-major GEMM-like operator. Matrix `A` has shape `M x K`, matrix `B` has shape `K x N`, and the output `C` has shape `M x N`. Each element of C is computed as `C[i,j] = sum_{k=0..K-1} A[i,k] * B[k,j]`.
+All workloads in this tutorial implement the same row-major matrix multiplication operator. Matrix `A` has shape `M x K`, matrix `B` has shape `K x N`, and the output matrix `C` has shape `M x N`. Each element of the output is the dot product of a row from `A` with a column from `B`:
 
-In flattened row-major memory, this is:
+`C[i,j] = sum_{k=0..K-1} A[i,k] * B[k,j]`
 
-`C[i*N + j] += A[i*K + k] * B[k*N + j]`
+When `A`, `B`, and `C` are stored in flattened row-major format (i.e. each row is laid out contiguously in memory), the 2D indices map to 1D offsets. The naive implementation looks like this:
 
-The default problem size in this repo is `M=256, K=1024, N=8192`, and total floating-point work is approximately `2*M*K*N` FLOPs.
+```cpp
+void matmul_naive(const float* A, const float* B, float* C, int M, int K, int N) {
+    for (int i = 0; i < M; ++i) {
+        for (int j = 0; j < N; ++j) {
+            float sum = 0.0f;
+            for (int k = 0; k < K; ++k) {
+                sum += A[i * K + k] * B[k * N + j];
+            }
+            C[i * N + j] = sum;
+        }
+    }
+}
+```
 
+The default problem size used throughout this repo is `M=256, K=1024, N=8192`. The total floating-point work for a single MatMul is approximately `2*M*K*N` FLOPs (one multiply and one add per inner loop iteration). Now let's get to work optimizing this source code for performance.
 ---
 
 ## Background: What the Top-Down View Shows You
 
-Before opening Performix, it helps to understand what the numbers mean. You can skip this section and refer back to it as needed.
+Before opening Performix, it helps to understand what the profiling results mean. You can skip this section and refer back to it as needed.
 
 ### The four buckets
 
-The Topdown method starts from a simple idea: in every CPU cycle, the core has a limited opportunity to make progress. Performix models that opportunity as a set of *slots*. You can think of a slot as one place where a micro-op could have been issued.
+Michroarchitectual analysis starts from a simple idea: in every CPU cycle, the core has a limited opportunity to make progress. Performix models that opportunity as a set of *slots*. You can think of a slot as one place where a micro-op could have been issued by the cpu.
 
 Performix then accounts for every slot and asks what happened to it. Did it turn into useful work, sit idle because the frontend could not supply work, get held up in the backend, or get spent on speculative work that was later discarded? These outcomes are grouped into four mutually exclusive buckets.
 
@@ -49,7 +62,7 @@ Performix then accounts for every slot and asks what happened to it. Did it turn
 
 ### The narrowing hierarchy
 
-A Top-Down analysis works by moving from broad categories to more specific ones. You begin with the bucket that accounts for the largest share of slots, then narrow the diagnosis to understand what sits underneath it:
+A Top-down analysis workflow works by moving from broad categories to more specific ones. You begin with the bucket that accounts for the largest share of slots, then narrow the diagnosis to understand what sits underneath it:
 
 ```
 Topdown
@@ -63,11 +76,11 @@ For example, if **Backend Bound** is the largest bucket, the next question is wh
 
 ### Performix's recipes and when to use them
 
-The Topdown view is one way of looking at a program in Performix, not the only one. Performix provides several recipes that answer different performance questions, and they are often most useful when used together.
+The microarchitectual analysis view is one way of looking at a program in Performix, not the only one. Performix provides several recipes that answer different performance questions, and they are often most useful when used together.
 
 **CPU Cycle Hotspots** shows *where* the program is spending CPU time, so it is useful for identifying the functions worth investigating. **Topdown** shows *why* those functions are slow by breaking slots into the categories described above. **Memory Access** gives a more detailed view of memory behaviour and is useful when Topdown suggests a memory-related bottleneck. **Instruction Mix** shows what kinds of instructions are being executed and is useful for checking whether code is scalar or vectorised.
 
-In this tutorial, **Topdown** is the main recipe because it provides the primary diagnostic signal for each optimisation step. The other recipes appear as supporting views when they help confirm or explain what Topdown is showing.
+In this tutorial, **Microarchitectual analysis** is the main recipe we will use because it provides the primary diagnostic signal for each optimisation step. The other recipes appear as supporting views when they help confirm or explain what it is showing.
 
 > **Note on measurement bias:** Performix's sampling reports Retiring slightly low and Frontend/Bad Speculation slightly high. Use values for **relative comparison between runs**, not as absolute ground truth.
 
@@ -88,7 +101,7 @@ This produces three executables: `matmul_naive`, `matmul_tiled`, and `matmul_neo
 
 ---
 
-## Profile the Baseline: Learning the Topdown Summary View
+## Profile the Baseline: Learning the Performix Microarchitectual Summary View
 
 Run the naive implementation to get a baseline timing:
 
@@ -125,9 +138,9 @@ The key access pattern is the innermost load `B[k*N + j]`: as `k` increments, th
 
 We suspect this is slow, but *why*? This is where Performix comes in.
 
-### Step 1: Run the Topdown recipe
+### Step 1: Run the Microarchtectual Analysis recipe
 
-Open Performix and select **Recipes -> Topdown**. Choose the `matmul_naive` executable as the target:
+Open Performix and select **Recipes -> Microarchtectual Analysis**. Choose the `matmul_naive` executable as the target:
 
 <p align="center">
 <img src="assets/run_recipe.png" width="850" alt="Selecting the Topdown recipe in Performix"/>
@@ -219,7 +232,7 @@ The animation below shows how tiling changes the access pattern. The dashed box 
 
 ### Re-profile: did it work?
 
-Run the Topdown recipe again, this time on `matmul_tiled`. Always re-profile after a change and never assume your optimisation had the intended effect.
+Run the Microarchitectual recipe again, this time on `matmul_tiled`. Always re-profile after a change and never assume your optimisation had the intended effect.
 
 <p align="center">
 <img src="assets/tiled_topdown.png" width="850" alt="Performix Topdown summary for tiled matmul"/>
@@ -249,7 +262,7 @@ With the memory bottleneck removed, look at the **Retiring** breakdown. In Perfo
 <img src="assets/tiled_retiring.png" width="200" alt="Operation mix for tiled matmul"/>
 </p>
 
-The operation mix reveals the next problem. Loads account for 28.3% of operations, stores 14.0%, integer operations 29.1%, floating-point scalar operations 14.0%, and **Advanced SIMD 0%**. In other words, Retiring is high, but the arithmetic is still entirely scalar. Every multiply-add is processing one `float` at a time. Arm NEON can process 4 floats per instruction, so the code is leaving roughly 4x throughput on the table.
+The operation mix reveals the next issue. Loads account for 28.3% of operations, stores 14.0%, integer operations 29.1%, floating-point scalar operations 14.0%, and **Advanced SIMD 0%**. In other words, Retiring is high, but the arithmetic is still entirely scalar. Every multiply-add is processing one `float` at a time. Arm NEON vector units can process 4 floats per instruction, so the code is leaving roughly 4x throughput on the table.
 
 **New diagnosis: Retiring is high but scalar-only. The bottleneck is now compute throughput, not memory.**
 
@@ -327,31 +340,24 @@ The result confirms the optimisation worked. Scalar floating-point dropped from 
 ---
 
 ## The Full Picture
-
-Run all three back-to-back and compare your Performix profiles:
-
+ 
+Run all three variants back-to-back and compare your Performix profiles:
+ 
 ```bash
 ./matmul_naive
 ./matmul_tiled
 ./matmul_neon
 ```
-
-Across the three optimisation steps, the Performix Topdown view tells a consistent story of progress. For the naive kernel, Backend Bound dominates, the cache metrics show poor locality, and SIMD utilisation is 0%. After tiling, Retiring becomes dominant and L1D miss activity drops sharply, but SIMD remains at 0%. After adding NEON register blocking, SIMD utilisation rises substantially and Backend Bound stays low.
-
-The diagnostic workflow follows the same pattern at each step. For the naive kernel, Performix pointed to Backend Bound, which narrowed to Memory Bound and then severe L1D misses caused by strided B access. The fix was 2D tiling to keep tiles in cache. For the tiled kernel, Performix showed Retiring was dominant but SIMD was 0%, pointing to scalar arithmetic as the bottleneck. The fix was a NEON 4x4 micro-kernel. After the NEON version, SIMD utilisation is at 31.6% and Backend Bound is minimal, indicating the workload is now compute-efficient.
-
-The key is that **Performix told us what to fix at each step**. The Topdown Summary pointed to the bottleneck category, and narrowing the diagnosis with cache effectiveness or the operation mix told us exactly what to change.
-
+ 
+At each step, Performix pointed to a specific bottleneck and the fix addressed it directly. The naive kernel was Backend Bound due to L1D misses from strided `B` access — tiling fixed that. The tiled kernel showed high Retiring but 0% SIMD — NEON register blocking fixed that. After all three changes, SIMD utilisation is up and Backend Bound is minimal.
+ 
+The diagnostic pattern is always the same: **Summary view → dominant bucket → narrow the diagnosis → connect to code → fix → re-profile.**
+ 
 ---
-
+ 
 ## Key Takeaways
-
-**Follow the Top-Down workflow.** The pattern is: Summary view -> dominant bucket -> narrow the diagnosis -> connect to code -> fix -> re-profile. This is the loop you will use in every tutorial in this course.
-
-**Backend Bound combined with high L1D miss rates and spillover to deeper cache levels** means your working set does not fit in cache well enough. The fix is to tile your loops or restructure your data access so that the inner computation operates on smaller blocks.
-
-**High Retiring with 0% SIMD** means the pipeline is busy but processing only one element at a time. Vectorising with NEON intrinsics can deliver up to 4x throughput improvement for 32-bit float arithmetic.
-
-**Always re-profile after each change.** Performix makes it easy to compare runs and confirm your optimisation addressed the right bottleneck. Never assume a change improved performance without measuring.
-
-**Use the right recipe for the question.** Topdown is for diagnosing bottleneck categories. CPU Cycle Hotspots is for finding which functions are hot. Memory Access provides detailed cache analysis. Instruction Mix verifies that vectorisation was applied correctly.
+ 
+- **Follow the Top-Down workflow.** Start with the Summary view, identify the dominant bucket, narrow the diagnosis, fix, and re-profile. This loop applies to every workload, not just matrix multiplication.
+- **Always re-profile after each change.** Never assume an optimisation worked — measure it.
+- **Use the right recipe for the question.** Microarchitectural Analysis diagnoses bottleneck categories. CPU Cycle Hotspots finds hot functions. Memory Access provides detailed cache analysis. Instruction Mix verifies vectorisation.
+ 
