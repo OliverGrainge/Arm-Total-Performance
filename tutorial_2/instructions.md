@@ -1,12 +1,13 @@
 # Tutorial 2: Optimising a Memory-Bound Workload with Arm-Performix
-Memory bottlenecks are common on modern CPUs and often hard to spot without the right tools. A loop with simple arithmetic, no branching, and no data dependencies can still run far below its theoretical peak, and the cause is frequently a data layout problem rather than anything in the algorithm itself.
 
-In this tutorial, you will use **Arm Performix** to investigate exactly this kind of problem on **AWS Graviton**. Starting from a particle physics position-update loop with a subtle data layout inefficiency, you will use Performix's **Memory Access** recipe to measure cache behaviour, **CPU Cycle Hotspots** to map the cost to specific source lines, and both together to confirm the fix once applied. By the end of this tutorial, you will know how to:
+A loop with simple arithmetic, no branching, and no data dependencies can still run far below peak performance. The cause is often a memory bottleneck rather than anything in the algorithm itself. Without hardware-level measurement, these bottlenecks are easy to miss entirely.
+
+This tutorial uses **Arm Performix** to investigate exactly this kind of problem. The example workload is a particle physics position-update loop with a subtle data layout inefficiency. You'll use two Performix recipes together - **Memory Access** to measure cache behaviour, and **CPU Cycle Hotspots** to map the cost to specific source lines - then re-profile to confirm the fix. By the end you'll know how to:
 
 1. Use the Memory Access recipe to measure cache hit rates and average load latency.
 2. Use CPU Cycle Hotspots to map memory pressure to specific source lines.
-3. Diagnose a data layout bottleneck by connecting evidence from two recipes.
-4. Verify the fix by re-profiling and comparing before and after metrics.
+3. Diagnose a data layout bottleneck by connecting evidence from both recipes.
+4. Verify the fix by re-profiling and comparing before-and-after metrics.
 
 ## Before you begin
 
@@ -68,8 +69,7 @@ The binary prints a checksum. Record it, you will use it later to verify that an
 
 ### Visualise the simulation
 
-To see the galaxy evolve, pass `--visualize` to either binary. Visualisation mode keeps the same particle count but extends the run to **1,000 iterations** so the winding is much easier to see. It writes subsampled position snapshots to `build/galaxy_aos.bin` (one frame before the loop starts, then one every 10 iterations -- **101 frames total**). A Python script reads the file and produces an animated GIF of the simulation. Run the commands below to generate the simulation you can see below.
-
+To see the galaxy evolve, pass `--visualize` to either binary. This runs a longer simulation and writes position snapshots that a Python script turns into an animated GIF. Run the commands below to generate the animation shown here.
 ```bash
 # From tutorial_2/build/
 ./aos_baseline --visualize
@@ -184,28 +184,27 @@ Two things stand out:
 
 Now we have two pieces of evidence to connect:
 
-- **Memory Access** shows a 68% L1C hit rate and ~29-cycle average L1C latency on a loop that should be fully prefetchable.
-- **CPU Cycle Hotspots** shows the `x` update line carrying ~75% of all loop samples, far more than `y` or `z`.
+- **Memory Access** shows a poor L1C hit rate and high average L1C latency on a loop that should be fully prefetchable.
+- **CPU Cycle Hotspots** shows the `x` update line carrying the vast majority of loop samples, far more than `y` or `z`.
 
-The `x` field is at **offset 0** in the `ParticleAoS` struct. Since each struct is exactly 64 bytes -- one cache line -- the access to `p[i].x` is the access that triggers the cache line fetch for that particle. The `y` and `z` fields at offsets 4 and 8 are already in the loaded line, so they resolve quickly. Line 20 is paying the memory latency for the entire struct, not just for `x`.
+The `x` field is at the start of the `ParticleAoS` struct. Since each struct fits exactly in one cache line, the access to `p[i].x` is what triggers the cache line fetch for that particle. The `y` and `z` fields sit in the same line and resolve quickly. The `x` line is paying the memory latency for the entire struct, not just for one field.
 
-This leads to the core question: **what is in that 64-byte cache line?**
-
+This leads to the core question: **what is in that cache line?**
 ```
 ParticleAoS: [x y z vx vy vz | mass charge temp | pressure energy density | spin_x spin_y spin_z pad]
              |<--- 24 bytes used --->|<------------------ 40 bytes wasted ------------------>|
              |<-------------------------------- 64 bytes loaded -------------------------------->|
 ```
 
-Each cache line fetch loads 64 bytes, but the update loop only uses the first 24 bytes (the six position and velocity floats). The remaining 40 bytes -- `mass`, `charge`, `temperature`, `pressure`, `energy`, `density`, `spin_*`, and padding -- are loaded, occupy cache space, and are evicted without ever being read. This is **37.5% cache line utilisation** (24 / 64).
+Each cache line fetch loads 64 bytes, but the update loop only touches the first 24 bytes (the six position and velocity floats). The remaining 40 bytes -- `mass`, `charge`, `temperature`, and so on -- are loaded, occupy cache space, and are evicted without ever being read. This is **37.5% cache line utilisation** (24 / 64).
 
 The consequences explain exactly what Performix reported:
 
-- **Low L1C hit rate (68%)**: with 40 wasted bytes per cache line, the effective working set is 64 MB (1,048,576 x 64 bytes). On Graviton2 this exceeds the 32 MB LLC, so every iteration must pull most data from DRAM. Even on Graviton3 with its larger 64 MB LLC, the working set fills the cache entirely, leaving no room for other data and causing continuous eviction pressure. L1C is also continuously filled with data the loop will never use, evicting useful lines before they can be reused.
-- **High L1C avg latency (29 cycles)**: the hardware prefetcher is streaming 64 bytes per particle when the loop only needs 24 -- 2.67x the necessary memory traffic. This extra pressure means prefetches frequently do not complete before the data is demanded, causing stalls that inflate the average L1C latency well above the true L1C hit cost of under 10 cycles.
-- **Skewed sample distribution**: line 20 dominates because it triggers the cache line fetch for each struct. Lines 21 and 22 benefit from the data already being resident.
+- **Low L1C hit rate**: with 40 wasted bytes per line, the effective working set is far larger than what the cache hierarchy can hold, so each iteration must pull most data from DRAM. Useful lines are continuously evicted to make room for data the loop never reads.
+- **High L1C avg latency**: the hardware prefetcher streams 64 bytes per particle when the loop only needs 24 -- 2.67x the necessary memory traffic. This unnecessary traffic means prefetches frequently fail to complete before the data is demanded, causing stalls.
+- **Skewed sample distribution**: the `x` line dominates because it triggers each cache line fetch. The following lines benefit from the data already being resident.
 
-The diagnosis is clear: **the data layout is the bottleneck**. The struct packs hot and cold fields together, wasting cache bandwidth and cache capacity on data the hot loop never reads.
+The diagnosis is clear: **the data layout is the bottleneck**. The struct packs hot and cold fields together, wasting cache bandwidth and capacity on data the hot loop never reads.
 
 ---
 
