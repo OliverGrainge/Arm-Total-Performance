@@ -1,8 +1,10 @@
 # Tutorial 3: Using Performix Instruction Mix to Optimise a C++ Workload
 
-This tutorial shows you how to use **Arm Performix** to optimise a real C++ LLM chatbot program. You will apply two Performix recipes - **CPU Cycle Hotspots** and **Instruction Mix** - in sequence. CPU Cycle Hotspots tells you which function is worth investigating. Instruction Mix tells you how that function is spending its time at the instruction level. Together they give you a concrete, evidence-based optimisation direction rather than a guess.
+Knowing that a program is slow is not the same as knowing why. A function can dominate the runtime and still leave most of the processor's arithmetic hardware completely idle — and without the right measurement, that gap is invisible.
 
-The workload is `gpt2`, a text-generation program that runs a medium-sized language model on the CPU. It is a realistic inference workload: compute-intensive, numerically dominated, and representative of the kind of code that benefits most from Arm's vector extensions. The tutorial follows the full loop a developer would use in practice: profile the workload, diagnose the bottleneck, apply a targeted fix, and re-profile to confirm the change worked. By the end of this tutorial, you will know how to:
+This tutorial shows you how to use **Arm Performix** to diagnose and fix exactly that problem. The example workload is `gpt2`, a C++ text-generation program running a real language model on the CPU. You'll apply two Performix recipes in sequence: **CPU Cycle Hotspots** to find the dominant function, then **Instruction Mix** to see how that function is spending its time at the instruction level. Together they give you a concrete, evidence-based diagnosis rather than a guess.
+
+You'll follow the same **profile → diagnose → fix → re-profile** loop introduced in Tutorial 1. By the end you'll know how to:
 
 1. Use CPU Cycle Hotspots to determine which function is worth investigating.
 2. Use the Instruction Mix recipe to measure how instructions are distributed across scalar and vector units.
@@ -170,7 +172,7 @@ The inner loop performs one scalar multiply-accumulate per iteration, surrounded
 
 ## Fix and Re-Profile: KleidiAI SVE Microkernel
 
-Performix has identified the problem: the dominant function is a scalar loop running on a processor with idle SVE vector units. The fix is to replace it with a vectorised implementation from [KleidiAI](https://github.com/ARM-software/kleidiai), Arm's open-source library of hand-tuned AI microkernels.
+Performix has identified the problem: the dominant function is a scalar loop running on a processor with idle SVE vector units. The fix is to replace it with a vectorised implementation such as one from [KleidiAI](https://github.com/ARM-software/kleidiai), Arm's open-source library of highly tuned AI microkernels.
 
 The change has two parts. First, weight matrices are repacked once at startup into a tiled memory layout the microkernel can load efficiently - this cost is not included in the reported tok/s. Second, the scalar loop body is replaced by calls to `ukernel.run_matmul`. The bias addition (`b ? b[i] : 0.f`) is folded into the surrounding code so the microkernel handles only the matrix multiply; the final result is identical.
 
@@ -231,7 +233,7 @@ In Performix, select **Recipes -> Instruction Mix**, set the workload to `gpt2_k
 <img src="assets/gpt2_kai_sve_instruction_mix.png" width="500" alt="Instruction Mix for gpt2_kai_sve: SVE instructions now account for the largest share of retired instructions at roughly 53%, with Floating Point Operations near zero"/>
 </p>
 
-The chart has changed dramatically. **SVE Operations** are now the single largest category at roughly 53% of all retired instructions - up from 0% in the baseline. **Scalar FP Operations** have collapsed to near zero. This is the inversion the diagnosis predicted: the processor is now spending the majority of its arithmetic work in 256-bit vector instructions rather than scalar ones.
+The chart has changed dramatically. **SVE Operations** are now the single largest category at roughly 53% of all retired instructions - up from 0% in the baseline. **Scalar FP Operations** have collapsed to near zero. This is the inversion the diagnosis predicted: the processor is now spending the majority of its arithmetic work in vector instructions rather than scalar ones.
 
 The **Load Operations** bar (~34%) is higher than in the baseline as a proportion of the total. This is a side-effect of the packed weight layout: the microkernel loads a wide tile of weight data per inner-loop iteration, so loads are a larger fraction of the total instruction stream even though the total instruction count is much lower.
 
