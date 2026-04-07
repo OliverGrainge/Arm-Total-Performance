@@ -1,0 +1,7 @@
+numpy
+matplotlib
+Pillow
+torch
+transformers
+open-clip-torch
+huggingface_hub<0.25
