@@ -1,0 +1,89 @@
+---
+id: 6d53f3f0-1397-405f-a613-53d5259a800f
+timestamp: '2026-04-15T19:36:08.936960+00:00'
+tool: knowledge_base_search
+args:
+  query: NEON equivalent of _mm_shuffle_epi8
+reason: testing
+---
+id: 25afb2f2-91bc-42d7-b55b-5d62016dc76f
+timestamp: '2026-04-15T19:36:20.995619+00:00'
+tool: knowledge_base_search
+args:
+  query: NEON equivalent of _mm_shuffle_epi8
+reason: testing
+---
+id: 26452399-7e7f-4763-b956-2f63c026fc32
+timestamp: '2026-04-15T19:36:34.144010+00:00'
+tool: knowledge_base_search
+args:
+  query: NEON equivalent of _mm_shuffle_epi8
+reason: testing
+---
+id: 3c275eb8-ea66-4e49-8b51-47e97ce58396
+timestamp: '2026-04-15T19:38:29.101918+00:00'
+tool: migrate_ease_scan
+args:
+  scanner: cpp
+  arch: armv8-a
+  git_repo: null
+  output_format: json
+  extra_args: null
+reason: scanning base64 x86 SIMD code for Arm compatibility
+---
+id: 10dfbc35-df88-4856-bbc4-7da9cc21c7ff
+timestamp: '2026-04-15T19:48:02.247312+00:00'
+tool: knowledge_base_search
+args:
+  query: NEON equivalent of _mm_shuffle_epi8
+reason: Find the Arm NEON intrinsic or guidance corresponding to the x86 SSSE3 intrinsic
+  _mm_shuffle_epi8.
+---
+id: feacb078-04da-465d-bb60-c65c079f6e94
+timestamp: '2026-04-15T19:48:05.818111+00:00'
+tool: knowledge_base_search
+args:
+  query: _mm_shuffle_epi8 NEON tbl vqtbl1q_u8
+reason: Refine the search to the byte-table-lookup NEON intrinsic typically used as
+  the equivalent of _mm_shuffle_epi8.
+---
+id: 823bc590-e59c-462d-98e2-be64fa2426dc
+timestamp: '2026-04-15T19:48:43.680939+00:00'
+tool: migrate_ease_scan
+args:
+  scanner: cpp
+  arch: armv8-a
+  git_repo: null
+  output_format: json
+  extra_args: null
+reason: Scan the workspace for x86-specific SIMD constructs before porting the base64
+  implementation to ARM NEON.
+---
+id: b3e119b5-2425-4480-bab7-1a8216aace76
+timestamp: '2026-04-15T19:48:44.702178+00:00'
+tool: knowledge_base_search
+args:
+  query: NEON equivalents for x86 intrinsics _mm_loadu_si128 _mm_storeu_si128 _mm_shuffle_epi8
+    _mm_and_si128 _mm_or_si128 _mm_andnot_si128 _mm_set1_epi8 _mm_set1_epi32 _mm_setr_epi8
+    _mm_mulhi_epu16 _mm_mullo_epi16 _mm_maddubs_epi16 _mm_madd_epi16 _mm_subs_epu8
+    _mm_cmpgt_epi8 _mm_cmpeq_epi8 _mm_add_epi8
+reason: Look up the ARM NEON equivalents and decomposition strategies for the x86
+  SIMD intrinsics used by the base64 encoder/decoder.
+---
+id: f5b1a47e-f7f7-4f24-9609-3abe0f5f094d
+timestamp: '2026-04-15T19:48:53.710064+00:00'
+tool: knowledge_base_search
+args:
+  query: Arm NEON equivalent for _mm_shuffle_epi8 using vqtbl1q_u8 and how to replace
+    _mm_mulhi_epu16 _mm_mullo_epi16 with vmull_u16 vshrn_n_u32 or explicit shifts
+    in AArch64 NEON
+reason: Need specific NEON translation guidance for the base64 encoder reshuffle and
+  multiply-shift stages.
+---
+id: 09c0a94d-fbe0-4693-a166-c28234f188b0
+timestamp: '2026-04-15T19:48:53.823202+00:00'
+tool: knowledge_base_search
+args:
+  query: Arm NEON equivalent for _mm_maddubs_epi16 and _mm_madd_epi16 using vmull_u8
+    vpaddlq_u16 vmull_u16 vpaddlq_u32 when porting SIMD decode pipeline
+reason: Need specific NEON decomposition strategy for the base64 decoder merge stages.
